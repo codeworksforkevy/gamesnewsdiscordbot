@@ -5,38 +5,45 @@ from services.humble import fetch_humble_free
 from utils.pagination import RedisPagination
 from config import GUILD_ID, PLATFORM_COLORS
 
+def build_embed(title, games, color):
+    desc = ""
+    for g in games[:2]:
+        desc += f"**{g['title']}**\n{g['url']}\n\n"
+    embed = discord.Embed(title=title, description=desc, color=color)
+    if games and games[0].get("thumbnail"):
+        embed.set_thumbnail(url=games[0]["thumbnail"])
+    return embed
+
 async def register_free_games(bot, session):
 
-    @bot.tree.command(name="free_games", description="All free games grouped by platform", guild=discord.Object(id=GUILD_ID))
+    @bot.tree.command(name="free_games", description="Grouped free games", guild=discord.Object(id=GUILD_ID))
     async def free_games(interaction: discord.Interaction):
-
         epic = await fetch_epic_free(session)
         gog = await fetch_gog_free(session)
         humble = await fetch_humble_free(session)
 
-        platform_groups = {"epic": epic, "gog": gog, "humble": humble}
         pages = []
 
-        for platform, games in platform_groups.items():
-            if not games:
-                continue
-            for i in range(0, len(games), 2):
-                chunk = games[i:i+2]
-                desc = ""
-                for g in chunk:
-                    desc += f"**{g['title']}**\n{g['url']}\n\n"
-
-                embed = discord.Embed(
-                    title=f"{platform.upper()} Free Games",
-                    description=desc,
-                    color=PLATFORM_COLORS.get(platform)
-                )
-                embed.set_footer(text=f"{platform.upper()} • Page {i//2+1}/{(len(games)+1)//2}")
-                pages.append(embed)
+        if epic:
+            pages.append(build_embed("EPIC Free Games", epic, PLATFORM_COLORS["epic"]))
+        if gog:
+            pages.append(build_embed("GOG Free Games", gog, PLATFORM_COLORS["gog"]))
+        if humble:
+            pages.append(build_embed("HUMBLE Free Games", humble, PLATFORM_COLORS["humble"]))
 
         if not pages:
             await interaction.response.send_message("No free games found.", ephemeral=True)
             return
 
-        view = RedisPagination(pages, interaction.user.id)
+        view = RedisPagination(pages)
         await interaction.response.send_message(embed=pages[0], view=view)
+
+    @bot.tree.command(name="freegames_now", description="Force show free games (Admin only)", guild=discord.Object(id=GUILD_ID))
+    @discord.app_commands.checks.has_permissions(administrator=True)
+    async def freegames_now(interaction: discord.Interaction):
+        epic = await fetch_epic_free(session)
+        if not epic:
+            await interaction.response.send_message("No games found.", ephemeral=True)
+            return
+        embed = build_embed("FORCED Free Games Snapshot", epic, PLATFORM_COLORS["epic"])
+        await interaction.response.send_message(embed=embed)
