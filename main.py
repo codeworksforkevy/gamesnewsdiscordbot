@@ -13,20 +13,25 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 session = None
+commands_loaded = False
 
 
 @bot.event
 async def on_ready():
+    global commands_loaded
+
     print(f"Bot ready: {bot.user}")
-    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-    print("Slash commands synced.")
 
+    if not commands_loaded:
+        await register_free_games(bot, session)
+        await register_luna(bot, session)
+        await register_discounts(bot, session)
+        await register_twitch_badges(bot, session)
 
-async def setup_commands():
-    await register_free_games(bot, session)
-    await register_luna(bot, session)
-    await register_discounts(bot, session)
-    await register_twitch_badges(bot, session)
+        await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+        print("Slash commands synced.")
+
+        commands_loaded = True
 
 
 async def main():
@@ -34,7 +39,6 @@ async def main():
     session = aiohttp.ClientSession()
 
     try:
-        await setup_commands()
         await bot.start(DISCORD_TOKEN)
     finally:
         if session:
