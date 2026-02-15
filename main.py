@@ -9,8 +9,6 @@ from commands.membership import register_luna
 from commands.discounts import register_discounts
 from commands.twitch_badges import register_twitch_badges
 
-print("Registered commands:", bot.tree.get_commands())
-
 
 class GameBot(commands.Bot):
     def __init__(self):
@@ -27,6 +25,9 @@ class GameBot(commands.Bot):
         await register_luna(self, self.session)
         await register_discounts(self, self.session)
         await register_twitch_badges(self, self.session)
+
+        # 👇 DEBUG DOĞRU YER
+        print("Registered commands:", self.tree.get_commands())
 
         # Global sync
         await self.tree.sync()
