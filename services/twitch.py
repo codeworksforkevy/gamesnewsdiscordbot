@@ -1,8 +1,8 @@
+
 import os
 import asyncio
 from bs4 import BeautifulSoup
 from utils.cache import cache_get, cache_set
-
 
 BASE_URL = "https://www.streamdatabase.com"
 
@@ -10,9 +10,7 @@ TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 
 
-# ---------------------------------------------------
-# 🔐 TOKEN AUTO REFRESH
-# ---------------------------------------------------
+# ---------------- TOKEN AUTO REFRESH ----------------
 
 async def get_app_access_token(session):
     cache_key = "twitch_app_token"
@@ -41,9 +39,7 @@ async def get_app_access_token(session):
     return token
 
 
-# ---------------------------------------------------
-# 🟣 OFFICIAL TWITCH BADGES (THUMBNAIL)
-# ---------------------------------------------------
+# ---------------- OFFICIAL BADGES (THUMBNAILS) ----------------
 
 async def fetch_official_global_badges(session):
     cache_key = "twitch_global_badges_official"
@@ -81,9 +77,7 @@ async def fetch_official_global_badges(session):
     return badge_map
 
 
-# ---------------------------------------------------
-# 📰 STREAMDATABASE TEXT SCRAPER
-# ---------------------------------------------------
+# ---------------- STREAMDATABASE TEXT SCRAPER ----------------
 
 async def fetch_twitch_badges(session):
     cache_key = "twitch_badges_streamdatabase"
