@@ -1,16 +1,25 @@
-import json
-import redis
-from config import REDIS_URL, CACHE_TTL
+import time
 
-redis_client = redis.from_url(REDIS_URL) if REDIS_URL else None
-
-def cache_set(key, value):
-    if redis_client:
-        redis_client.setex(key, CACHE_TTL, json.dumps(value))
+_cache = {}
 
 def cache_get(key):
-    if redis_client:
-        data = redis_client.get(key)
-        if data:
-            return json.loads(data)
-    return None
+    entry = _cache.get(key)
+    if not entry:
+        return None
+
+    value, expires_at = entry
+
+    if expires_at and time.time() > expires_at:
+        del _cache[key]
+        return None
+
+    return value
+
+
+def cache_set(key, value, ttl=None):
+    expires_at = None
+
+    if ttl:
+        expires_at = time.time() + ttl
+
+    _cache[key] = (value, expires_at)
