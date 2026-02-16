@@ -1,18 +1,30 @@
 async def fetch_epic_free(session):
+
     url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
-    async with session.get(url) as r:
-        data = await r.json()
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    async with session.get(url, headers=headers) as response:
+        print("Epic status:", response.status)
+        data = await response.json()
+
+    elements = data["data"]["Catalog"]["searchStore"]["elements"]
+
+    print("Total elements:", len(elements))
+
+    # Şimdilik filtre yapmıyoruz
     games = []
-    for game in data["data"]["Catalog"]["searchStore"]["elements"]:
-        promos = game.get("promotions")
-        if promos and promos.get("promotionalOffers"):
-            offer = promos["promotionalOffers"][0]["promotionalOffers"][0]
-            if offer["discountSetting"]["discountPercentage"] == 0:
-                slug = game.get("productSlug")
-                if slug:
-                    games.append({
-                        "title": game["title"],
-                        "url": f"https://store.epicgames.com/en-US/p/{slug}",
-                        "platform": "epic"
-                    })
+
+    for game in elements[:5]:
+        games.append({
+            "title": game.get("title"),
+            "url": "https://store.epicgames.com",
+            "thumbnail": None,
+            "platform": "epic"
+        })
+
+    print("Returning dummy epic count:", len(games))
+
     return games
