@@ -1,25 +1,51 @@
+import os
+import redis
+import json
 import time
 
-_cache = {}
+# ---------------------------------------------------
+# REDIS CONNECTION
+# ---------------------------------------------------
+
+REDIS_URL = os.getenv("REDIS_URL")
+
+redis_client = None
+
+if REDIS_URL:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
+
+# ---------------------------------------------------
+# CACHE GET
+# ---------------------------------------------------
 
 def cache_get(key):
-    entry = _cache.get(key)
-    if not entry:
+    if not redis_client:
         return None
 
-    value, expires_at = entry
-
-    if expires_at and time.time() > expires_at:
-        del _cache[key]
+    data = redis_client.get(key)
+    if not data:
         return None
 
-    return value
+    try:
+        return json.loads(data)
+    except Exception:
+        return None
 
+
+# ---------------------------------------------------
+# CACHE SET (TTL SUPPORT)
+# ---------------------------------------------------
 
 def cache_set(key, value, ttl=None):
-    expires_at = None
+    if not redis_client:
+        return
 
-    if ttl:
-        expires_at = time.time() + ttl
-
-    _cache[key] = (value, expires_at)
+    try:
+        serialized = json.dumps(value)
+        if ttl:
+            redis_client.setex(key, ttl, serialized)
+        else:
+            redis_client.set(key, serialized)
+    except Exception:
+        pass
