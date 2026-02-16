@@ -1,3 +1,4 @@
+import os
 import asyncio
 from bs4 import BeautifulSoup
 from utils.cache import cache_get, cache_set
@@ -5,6 +6,84 @@ from utils.cache import cache_get, cache_set
 
 BASE_URL = "https://www.streamdatabase.com"
 
+TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
+TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
+
+
+# ---------------------------------------------------
+# 🔐 TOKEN AUTO REFRESH
+# ---------------------------------------------------
+
+async def get_app_access_token(session):
+    cache_key = "twitch_app_token"
+    cached = cache_get(cache_key)
+
+    if cached:
+        return cached
+
+    url = "https://id.twitch.tv/oauth2/token"
+
+    payload = {
+        "client_id": TWITCH_CLIENT_ID,
+        "client_secret": TWITCH_CLIENT_SECRET,
+        "grant_type": "client_credentials"
+    }
+
+    async with session.post(url, data=payload) as r:
+        data = await r.json()
+
+    token = data.get("access_token")
+    expires = data.get("expires_in", 3600)
+
+    if token:
+        cache_set(cache_key, token, ttl=expires - 60)
+
+    return token
+
+
+# ---------------------------------------------------
+# 🟣 OFFICIAL TWITCH BADGES (THUMBNAIL)
+# ---------------------------------------------------
+
+async def fetch_official_global_badges(session):
+    cache_key = "twitch_global_badges_official"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    token = await get_app_access_token(session)
+    if not token:
+        return {}
+
+    headers = {
+        "Client-ID": TWITCH_CLIENT_ID,
+        "Authorization": f"Bearer {token}"
+    }
+
+    url = "https://api.twitch.tv/helix/chat/badges/global"
+
+    async with session.get(url, headers=headers) as r:
+        if r.status != 200:
+            return {}
+        data = await r.json()
+
+    badge_map = {}
+
+    for badge in data.get("data", []):
+        set_id = badge.get("set_id")
+        versions = badge.get("versions", [])
+
+        if versions:
+            badge_map[set_id.lower()] = versions[0].get("image_url_4x")
+
+    cache_set(cache_key, badge_map, ttl=3600)
+
+    return badge_map
+
+
+# ---------------------------------------------------
+# 📰 STREAMDATABASE TEXT SCRAPER
+# ---------------------------------------------------
 
 async def fetch_twitch_badges(session):
     cache_key = "twitch_badges_streamdatabase"
@@ -42,10 +121,10 @@ async def fetch_badge_detail(session, detail_url):
     except Exception:
         return None
 
-    detail_soup = BeautifulSoup(detail_html, "html.parser")
+    soup = BeautifulSoup(detail_html, "html.parser")
 
-    title_tag = detail_soup.find("h1")
-    desc_label = detail_soup.find(string="Description")
+    title_tag = soup.find("h1")
+    desc_label = soup.find(string="Description")
 
     if not title_tag or not desc_label:
         return None
@@ -54,20 +133,7 @@ async def fetch_badge_detail(session, detail_url):
     if not desc_p:
         return None
 
-    # Badge image
-    thumbnail = None
-    for img in detail_soup.find_all("img"):
-        src = img.get("src") or img.get("data-src")
-        if src and "/wp-content/uploads/" in src:
-            thumbnail = src
-            break
-
-    if thumbnail and thumbnail.startswith("/"):
-        thumbnail = BASE_URL + thumbnail
-
     return {
         "title": title_tag.text.strip(),
-        "description": desc_p.text.strip(),
-        "thumbnail": thumbnail,
-        "platform": "twitch"
+        "description": desc_p.text.strip()
     }
