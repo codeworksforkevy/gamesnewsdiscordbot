@@ -1,3 +1,4 @@
+
 import discord
 from discord import app_commands
 from services.twitch import (
@@ -14,9 +15,22 @@ TWITCH_FALLBACK_ICON = "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dar
 def match_badge_thumbnail(title, official_map):
     title = title.lower()
 
-    for key, url in official_map.items():
-        if key in title:
-            return url
+    keyword_map = {
+        "moderator": ["moderator"],
+        "vip": ["vip"],
+        "subscriber": ["subscriber", "tier"],
+        "founder": ["founder"],
+        "bits": ["bits"],
+        "staff": ["staff"],
+        "broadcaster": ["broadcaster"],
+        "premium": ["premium"],
+        "turbo": ["turbo"],
+    }
+
+    for set_id, keywords in keyword_map.items():
+        for word in keywords:
+            if word in title:
+                return official_map.get(set_id)
 
     return None
 
@@ -54,7 +68,7 @@ async def register_twitch_badges(bot, session):
                 desc_block += f"**{b['title']}**\n{b['description']}\n\n"
 
             embed = discord.Embed(
-                title="Global Badges",
+                title="👩‍💻 Global Badges",
                 description=desc_block.strip(),
                 color=PLATFORM_COLORS.get("twitch", 0x9146FF)
             )
@@ -78,6 +92,11 @@ async def register_twitch_badges(bot, session):
 
         view = RedisPagination(pages, interaction.user.id)
 
+        try:
+            bot.tree.remove_command("twitch_badges")
+        except Exception:
+            pass
+
         await interaction.followup.send(
             embed=pages[0],
             view=view
@@ -89,5 +108,9 @@ async def register_twitch_badges(bot, session):
         callback=badges_callback
     )
 
-    bot.tree.add_command(command)
+    try:
+        bot.tree.remove_command("twitch_badges")
+    except Exception:
+        pass
 
+    bot.tree.add_command(command)
