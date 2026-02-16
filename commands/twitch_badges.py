@@ -1,6 +1,4 @@
 import discord
-import aiohttp
-from io import BytesIO
 from discord import app_commands
 from services.twitch import fetch_twitch_badges
 from utils.pagination import RedisPagination
@@ -10,22 +8,11 @@ from config import PLATFORM_COLORS
 TWITCH_FALLBACK_ICON = "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0"
 
 
-async def download_image(session, url):
-    try:
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                data = await resp.read()
-                return BytesIO(data)
-    except Exception:
-        return None
-    return None
-
-
 async def register_twitch_badges(bot, session):
 
     async def badges_callback(interaction: discord.Interaction):
 
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
 
         try:
             badges = await fetch_twitch_badges(session)
@@ -44,7 +31,6 @@ async def register_twitch_badges(bot, session):
             return
 
         pages = []
-        files = []
 
         for i in range(0, len(badges), 2):
             chunk = badges[i:i+2]
@@ -64,18 +50,9 @@ async def register_twitch_badges(bot, session):
             primary_badge = chunk[0]
             thumbnail_url = primary_badge.get("thumbnail")
 
-            file = None
-
-            # 🔥 Görseli indir ve attachment yap
             if thumbnail_url and thumbnail_url.startswith("http"):
-                image_bytes = await download_image(session, thumbnail_url)
-                if image_bytes:
-                    filename = f"badge_{i}.png"
-                    file = discord.File(fp=image_bytes, filename=filename)
-                    embed.set_thumbnail(url=f"attachment://{filename}")
-
-            # Eğer indirilemezse fallback icon
-            if not file:
+                embed.set_thumbnail(url=thumbnail_url)
+            else:
                 embed.set_thumbnail(url=TWITCH_FALLBACK_ICON)
 
             embed.set_footer(
@@ -83,14 +60,11 @@ async def register_twitch_badges(bot, session):
             )
 
             pages.append(embed)
-            files.append(file)
 
         view = RedisPagination(pages, interaction.user.id)
 
-        # İlk sayfayı dosya ile gönder
         await interaction.followup.send(
             embed=pages[0],
-            file=files[0] if files[0] else None,
             view=view
         )
 
@@ -101,5 +75,3 @@ async def register_twitch_badges(bot, session):
     )
 
     bot.tree.add_command(command)
-
-
