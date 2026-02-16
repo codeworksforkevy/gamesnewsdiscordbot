@@ -9,7 +9,14 @@ async def register_twitch_badges(bot, session):
 
     async def badges_callback(interaction: discord.Interaction):
 
-        badges = await fetch_twitch_badges(session)
+        try:
+            badges = await fetch_twitch_badges(session)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Error fetching Twitch badges: {str(e)}",
+                ephemeral=True
+            )
+            return
 
         if not badges:
             await interaction.response.send_message(
@@ -25,22 +32,33 @@ async def register_twitch_badges(bot, session):
             desc = ""
 
             for b in chunk:
-                desc += f"**{b['title']}**\n{b['description']}\n\n"
+                title = b.get("title", "Unknown Badge")
+                description = b.get("description", "No description available.")
+                desc += f"**{title}**\n{description}\n\n"
 
             embed = discord.Embed(
                 title="Twitch Global Badges",
-                description=desc,
-                color=PLATFORM_COLORS.get("twitch")
+                description=desc.strip(),
+                color=PLATFORM_COLORS.get("twitch", 0x9146FF)
             )
 
-            if chunk[0].get("thumbnail"):
-                embed.set_thumbnail(url=chunk[0]["thumbnail"])
+            # Thumbnail güvenli kontrol
+            thumbnail = chunk[0].get("thumbnail")
+            if thumbnail and thumbnail.startswith("http"):
+                embed.set_thumbnail(url=thumbnail)
 
-            embed.set_footer(text=f"Twitch • Page {i//2+1}")
+            embed.set_footer(
+                text=f"Twitch • Page {i//2+1}/{(len(badges)+1)//2}"
+            )
+
             pages.append(embed)
 
         view = RedisPagination(pages, interaction.user.id)
-        await interaction.response.send_message(embed=pages[0], view=view)
+
+        await interaction.response.send_message(
+            embed=pages[0],
+            view=view
+        )
 
     command = app_commands.Command(
         name="twitch_badges",
