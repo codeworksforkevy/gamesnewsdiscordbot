@@ -91,5 +91,3 @@ async def register_twitch_badges(bot, session):
 
     bot.tree.add_command(command)
 
-
-    bot.tree.add_command(command)
