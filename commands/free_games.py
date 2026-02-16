@@ -15,18 +15,21 @@ async def register_free_games(bot, session):
 
         try:
             epic = await fetch_epic_free(session)
+            print("Epic games fetched:", len(epic))
         except Exception as e:
             epic = []
             print("Epic fetch error:", e)
 
         try:
             gog = await fetch_gog_free(session)
+            print("GOG games fetched:", len(gog))
         except Exception as e:
             gog = []
             print("GOG fetch error:", e)
 
         try:
             humble = await fetch_humble_free(session)
+            print("Humble games fetched:", len(humble))
         except Exception as e:
             humble = []
             print("Humble fetch error:", e)
@@ -36,6 +39,8 @@ async def register_free_games(bot, session):
             "gog": gog or [],
             "humble": humble or []
         }
+
+        print("Platform distribution:", {k: len(v) for k, v in platform_groups.items()})
 
         pages = []
 
@@ -54,7 +59,7 @@ async def register_free_games(bot, session):
                 for g in chunk:
                     title = g.get("title", "Unknown Game")
                     url = g.get("url", "No URL available")
-                    desc += f"**{title}**\n{url}\n\n"
+                    desc += f"**{title}\n{url}\n\n"
 
                 embed = discord.Embed(
                     title=f"{platform.upper()} Free Games",
@@ -93,3 +98,4 @@ async def register_free_games(bot, session):
     )
 
     bot.tree.add_command(command)
+
