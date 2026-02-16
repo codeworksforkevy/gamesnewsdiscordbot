@@ -68,7 +68,7 @@ async def register_twitch_badges(bot, session):
                 desc_block += f"**{b['title']}**\n{b['description']}\n\n"
 
             embed = discord.Embed(
-                title="👩‍💻 Global Badges",
+                title="👩‍💻 Badges",
                 description=desc_block.strip(),
                 color=PLATFORM_COLORS.get("twitch", 0x9146FF)
             )
