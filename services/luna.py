@@ -1,17 +1,40 @@
 from bs4 import BeautifulSoup
 
-async def fetch_luna_membership(session):
-    url = "https://luna.amazon.com/"
-    async with session.get(url) as r:
-        html = await r.text()
+LUNA_URL = "https://gaming.amazon.com/home"
+
+
+async def fetch_luna_free(session):
+    try:
+        async with session.get(LUNA_URL, timeout=15) as resp:
+            if resp.status != 200:
+                print("Luna status:", resp.status)
+                return []
+            html = await resp.text()
+    except Exception as e:
+        print("Luna fetch error:", e)
+        return []
+
     soup = BeautifulSoup(html, "html.parser")
-    games = []
-    for img in soup.select("img")[:6]:
-        title = img.get("alt")
-        if title:
-            games.append({
-                "title": title,
-                "url": "https://luna.amazon.com/",
-                "platform": "luna"
+    offers = []
+
+    # Amazon DOM çok değişken olduğu için geniş selector
+    cards = soup.find_all("img")
+
+    for img in cards:
+        alt = img.get("alt")
+        src = img.get("src")
+
+        if not alt or not src:
+            continue
+
+        if "game" in alt.lower():
+            offers.append({
+                "platform": "luna",
+                "title": alt.strip(),
+                "url": LUNA_URL,
+                "thumbnail": src
             })
-    return games
+
+    print("Luna games fetched:", len(offers))
+    return offers
+
