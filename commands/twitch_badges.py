@@ -1,25 +1,31 @@
-
 import discord
-from discord import app_commands
-from services.twitch import fetch_twitch_badges
+import json
+from pathlib import Path
 from utils.pagination import RedisPagination
 from config import PLATFORM_COLORS
 
+CACHE_FILE = Path("data/twitch_badges_cache.json")
 
-async def register_twitch_badges(bot, session):
 
-    async def badges_callback(interaction: discord.Interaction):
+async def register_twitch_badges(tree):
+
+    @tree.command(
+        name="twitch_badges",
+        description="Show official Twitch global badges"
+    )
+    async def twitch_badges(interaction: discord.Interaction):
 
         await interaction.response.defer(thinking=True)
 
-        try:
-            badges = await fetch_official_global_badges(session)
-        except Exception as e:
+        if not CACHE_FILE.exists():
             await interaction.followup.send(
-                f"Error fetching Twitch badges: {str(e)}",
+                "Badge cache not ready yet.",
                 ephemeral=True
             )
             return
+
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            badges = json.load(f)
 
         if not badges:
             await interaction.followup.send(
@@ -35,7 +41,7 @@ async def register_twitch_badges(bot, session):
             desc_block = ""
 
             for badge in chunk:
-                desc_block += f"**{badge['set_id'].capitalize()}**\n\n"
+                desc_block += f"**{badge.get('title','Unknown')}**\n{badge.get('description','')}\n\n"
 
             embed = discord.Embed(
                 title="👩‍💻 Global Badges",
@@ -43,8 +49,8 @@ async def register_twitch_badges(bot, session):
                 color=PLATFORM_COLORS.get("twitch", 0x9146FF)
             )
 
-            # First badge thumbnail as page thumbnail
-            embed.set_thumbnail(url=chunk[0]["thumbnail"])
+            if chunk[0].get("thumbnail"):
+                embed.set_thumbnail(url=chunk[0]["thumbnail"])
 
             embed.set_footer(
                 text=f"Twitch • Page {i//4+1}/{(len(badges)+3)//4}"
@@ -54,25 +60,7 @@ async def register_twitch_badges(bot, session):
 
         view = RedisPagination(pages, interaction.user.id)
 
-        try:
-            bot.tree.remove_command("twitch_badges")
-        except Exception:
-            pass
-
         await interaction.followup.send(
             embed=pages[0],
             view=view
         )
-
-    command = app_commands.Command(
-        name="twitch_badges",
-        description="Show official Twitch global badges",
-        callback=badges_callback
-    )
-
-    try:
-        bot.tree.remove_command("twitch_badges")
-    except Exception:
-        pass
-
-    bot.tree.add_command(command)
