@@ -1,7 +1,7 @@
 
 import discord
 from discord import app_commands
-from services.twitch import fetch_official_global_badges
+from services.twitch import fetch_twitch_badges
 from utils.pagination import RedisPagination
 from config import PLATFORM_COLORS
 
