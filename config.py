@@ -1,5 +1,6 @@
+import os
 
-DISCORD_TOKEN = "YOUR_DISCORD_TOKEN"
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
 PLATFORM_COLORS = {
     "epic": 0x0E0E0E,
