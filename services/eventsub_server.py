@@ -1,28 +1,26 @@
-import logging
 from aiohttp import web
+import json
+from services.live_notifier import notify_live
+from services.twitch_api import get_app_token
 
-logger = logging.getLogger("eventsub")
-
-def create_eventsub_app(bot):
+async def create_eventsub_app(bot, channel_id):
 
     app = web.Application()
 
-    async def handle_eventsub(request):
-        headers = request.headers
-        body = await request.json()
+    async def webhook(request):
+        body = await request.text()
+        data = json.loads(body)
 
-        msg_type = headers.get("Twitch-Eventsub-Message-Type")
+        # Twitch verification challenge
+        if data.get("challenge"):
+            return web.Response(text=data["challenge"])
 
-        if msg_type == "webhook_callback_verification":
-            logger.info("Webhook verified.")
-            return web.Response(text=body["challenge"])
+        event = data.get("event")
+        if event:
+            await notify_live(bot, channel_id, event)
 
-        if msg_type == "notification":
-            logger.info("Live event received: %s", body)
+        return web.Response(text="ok")
 
-        return web.Response(status=200)
-
-    app.router.add_post("/twitch/eventsub", handle_eventsub)
+    app.router.add_post("/twitch/eventsub", webhook)
 
     return app
-
