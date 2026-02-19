@@ -16,7 +16,6 @@ ENV = os.getenv("ENV", "production").lower()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
 GUILD_ID = int(os.getenv("DEV_GUILD_ID", "0"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN missing")
@@ -36,8 +35,8 @@ logger = logging.getLogger("find-a-curie")
 # DISCORD SETUP
 # ==========================================
 
+# ⚠️ message_content intent kaldırıldı (privileged hata vermemesi için)
 intents = discord.Intents.default()
-intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
@@ -47,7 +46,7 @@ tree = bot.tree
 # ==========================================
 
 @tree.interaction_check
-async def admin_guard(interaction: discord.Interaction):
+async def admin_guard(interaction: discord.Interaction) -> bool:
 
     # Owner always allowed
     if interaction.user.id == BOT_OWNER_ID:
@@ -57,10 +56,12 @@ async def admin_guard(interaction: discord.Interaction):
     if interaction.guild and interaction.user.guild_permissions.administrator:
         return True
 
-    await interaction.response.send_message(
-        "You must be an administrator to use this command.",
-        ephemeral=True
-    )
+    if not interaction.response.is_done():
+        await interaction.response.send_message(
+            "You must be an administrator to use this command.",
+            ephemeral=True
+        )
+
     return False
 
 # ==========================================
@@ -109,14 +110,16 @@ async def on_ready():
 
     logger.info("Initial cache populated.")
 
-    # Dev Guild Sync
+    # Sync Logic
     if ENV == "dev" and GUILD_ID:
         guild = discord.Object(id=GUILD_ID)
         tree.copy_global_to(guild=guild)
         await tree.sync(guild=guild)
         logger.info("Dev guild sync complete.")
-    elif ENV == "production":
-        logger.info("Production mode — manual global sync recommended.")
+    else:
+        # Production global sync
+        await tree.sync()
+        logger.info("Global sync complete.")
 
     if not cache_loop.is_running():
         cache_loop.start()
@@ -145,13 +148,22 @@ async def start_web_server():
     logger.info("Web server running on port %s", port)
 
 # ==========================================
-# SETUP HOOK
+# MODULE SETUP
 # ==========================================
 
 async def setup_modules():
     await register_free_games(tree)
     await register_twitch_badges(tree)
     register_live_commands(bot)
+
+# ==========================================
+# SHUTDOWN HANDLER
+# ==========================================
+
+async def shutdown():
+    logger.info("Shutting down...")
+    await http_client.close()
+    await bot.close()
 
 # ==========================================
 # MAIN
@@ -165,7 +177,10 @@ async def main():
 
     await start_web_server()
 
-    await bot.start(DISCORD_TOKEN)
+    try:
+        await bot.start(DISCORD_TOKEN)
+    finally:
+        await shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
