@@ -12,7 +12,6 @@ from discord.ext import commands
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN missing")
@@ -61,7 +60,9 @@ async def health(request):
     return web.json_response({"status": "ok"})
 
 async def start_web_server():
-    app = create_eventsub_app(bot, CHANNEL_ID)
+    # 🔥 IMPORTANT: await burada zorunlu
+    app = await create_eventsub_app(bot, CHANNEL_ID)
+
     app.router.add_get("/", health)
 
     runner = web.AppRunner(app)
