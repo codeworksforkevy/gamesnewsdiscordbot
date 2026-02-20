@@ -1,22 +1,69 @@
 import os
 import aiohttp
 import logging
-
-from services.twitch_api import get_app_access_token
+import time
 
 logger = logging.getLogger("eventsub-manager")
 
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
+TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 
+_app_token = None
+_app_token_expiry = 0
+
+
+# ==================================================
+# APP TOKEN (SELF-CONTAINED)
+# ==================================================
+
+async def get_app_access_token():
+    global _app_token, _app_token_expiry
+
+    now = time.time()
+
+    if _app_token and now < _app_token_expiry:
+        return _app_token
+
+    url = "https://id.twitch.tv/oauth2/token"
+
+    payload = {
+        "client_id": TWITCH_CLIENT_ID,
+        "client_secret": TWITCH_CLIENT_SECRET,
+        "grant_type": "client_credentials"
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, data=payload) as resp:
+
+            if resp.status != 200:
+                text = await resp.text()
+                logger.error("Failed to refresh app token: %s", text)
+                return None
+
+            data = await resp.json()
+
+            _app_token = data.get("access_token")
+            expires_in = data.get("expires_in", 3600)
+
+            _app_token_expiry = now + expires_in - 60
+
+            logger.info("Twitch app token refreshed.")
+
+            return _app_token
+
+
+# ==================================================
+# SUBSCRIPTION CREATE
+# ==================================================
 
 async def create_subscription(broadcaster_id: str, sub_type: str):
 
     token = await get_app_access_token()
 
     if not token:
-        logger.error("Could not obtain Twitch app access token.")
+        logger.error("Could not obtain app token.")
         return False
 
     callback_url = f"{PUBLIC_BASE_URL}/twitch/eventsub"
