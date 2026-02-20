@@ -37,6 +37,45 @@ async def fetch_steam_free(session):
             "thumbnail": thumbnail
         })
 
-    print("Steam games fetched:", len(offers))
-    return offers
+STEAM_DISCOUNT_URL = "https://store.steampowered.com/search/?specials=1"
 
+
+async def fetch_steam_discounts(session):
+    try:
+        async with session.get(STEAM_DISCOUNT_URL, timeout=15) as resp:
+            if resp.status != 200:
+                print("Steam discount status:", resp.status)
+                return []
+            html = await resp.text()
+    except Exception as e:
+        print("Steam discount fetch error:", e)
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    offers = []
+
+    rows = soup.select(".search_result_row")
+
+    for row in rows[:10]:
+        title_el = row.select_one(".title")
+        img_el = row.select_one("img")
+        discount_el = row.select_one(".search_discount_pct")
+
+        if not title_el:
+            continue
+
+        title = title_el.text.strip()
+        url = row.get("href")
+        thumbnail = img_el["src"] if img_el else None
+        discount = discount_el.text.strip() if discount_el else "On Sale"
+
+        offers.append({
+            "platform": "steam",
+            "title": title,
+            "url": url,
+            "thumbnail": thumbnail,
+            "discount": discount
+        })
+
+    print("Steam discounts fetched:", len(offers))
+    return offers
