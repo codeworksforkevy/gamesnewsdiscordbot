@@ -5,7 +5,7 @@ from utils.pagination import RedisPagination
 from config import PLATFORM_COLORS
 
 
-async def register_discounts(bot, session):
+async def register(bot, session):
 
     async def discounts_callback(interaction: discord.Interaction):
 
@@ -25,11 +25,15 @@ async def register_discounts(bot, session):
             desc = ""
 
             for g in chunk:
-                desc += f"**{g['title']}**\n{g['discount']} OFF\n{g['url']}\n\n"
+                desc += (
+                    f"**{g['title']}**\n"
+                    f"{g.get('discount','On Sale')} OFF\n"
+                    f"{g['url']}\n\n"
+                )
 
             embed = discord.Embed(
                 title="Steam Major Discounts",
-                description=desc,
+                description=desc.strip(),
                 color=PLATFORM_COLORS.get("steam")
             )
 
@@ -40,12 +44,16 @@ async def register_discounts(bot, session):
             pages.append(embed)
 
         view = RedisPagination(pages, interaction.user.id)
-        await interaction.response.send_message(embed=pages[0], view=view)
 
-    command = app_commands.Command(
-        name="game_discounts",
-        description="Show current major game discounts",
-        callback=discounts_callback
+        await interaction.response.send_message(
+            embed=pages[0],
+            view=view
+        )
+
+    bot.tree.add_command(
+        app_commands.Command(
+            name="game_discounts",
+            description="Show current major game discounts",
+            callback=discounts_callback
+        )
     )
-
-    bot.tree.add_command(command)
