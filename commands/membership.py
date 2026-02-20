@@ -5,7 +5,7 @@ from utils.pagination import RedisPagination
 from config import PLATFORM_COLORS
 
 
-async def register_luna(bot, session):
+async def register(bot, session):
 
     async def membership_callback(interaction: discord.Interaction):
 
@@ -40,13 +40,15 @@ async def register_luna(bot, session):
             pages.append(embed)
 
         view = RedisPagination(pages, interaction.user.id)
-        await interaction.response.send_message(embed=pages[0], view=view)
+        await interaction.response.send_message(
+            embed=pages[0],
+            view=view
+        )
 
-    command = app_commands.Command(
-        name="membership_exclusives",
-        description="Show Amazon Luna membership games",
-        callback=membership_callback
+    bot.tree.add_command(
+        app_commands.Command(
+            name="membership_exclusives",
+            description="Show Amazon Luna membership games",
+            callback=membership_callback
+        )
     )
-
-    bot.tree.add_command(command)
-
