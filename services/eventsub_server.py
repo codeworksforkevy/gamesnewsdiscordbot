@@ -5,17 +5,13 @@ import hmac
 import hashlib
 import logging
 
-from services.live_notifier import notify_live
+from services.live_notifier import notify_live, mark_offline
 from commands.live_commands import load_streamers
 
 logger = logging.getLogger("eventsub")
 
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET")
 
-
-# ==================================================
-# SIGNATURE VERIFY
-# ==================================================
 
 def verify_signature(request, body: bytes) -> bool:
     if not TWITCH_EVENTSUB_SECRET:
@@ -41,10 +37,6 @@ def verify_signature(request, body: bytes) -> bool:
     return hmac.compare_digest(expected_signature, signature)
 
 
-# ==================================================
-# CREATE APP
-# ==================================================
-
 async def create_eventsub_app(bot):
 
     app = web.Application()
@@ -59,37 +51,22 @@ async def create_eventsub_app(bot):
             msg_type = request.headers.get("Twitch-Eventsub-Message-Type")
             data = json.loads(body.decode())
 
-            # 🟣 Challenge
+            # Challenge
             if msg_type == "webhook_callback_verification":
-                challenge = data.get("challenge")
-                return web.Response(text=challenge)
+                return web.Response(text=data.get("challenge"))
 
-            # 🟢 Notification
+            # Notification
             if msg_type == "notification":
 
                 event = data.get("event")
-                if not event:
-                    return web.Response(text="no event")
+                sub = data.get("subscription", {})
+                sub_type = sub.get("type")
 
-                twitch_user_id = event.get("broadcaster_user_id")
+                if sub_type == "stream.online":
+                    await notify_live(bot, None, event)
 
-                if not twitch_user_id:
-                    return web.Response(text="no broadcaster id")
-
-                registry = load_streamers()
-
-                # 🔥 Multi guild tarama
-                for guild_id, guild_data in registry.get("guilds", {}).items():
-
-                    streamers = guild_data.get("streamers", {})
-
-                    if twitch_user_id in streamers:
-
-                        info = streamers[twitch_user_id]
-                        channel_id = info.get("channel_id")
-
-                        if channel_id:
-                            await notify_live(bot, channel_id, event)
+                elif sub_type == "stream.offline":
+                    await mark_offline(event)
 
                 return web.Response(text="ok")
 
