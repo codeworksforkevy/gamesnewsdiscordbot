@@ -40,14 +40,19 @@ bot = commands.Bot(
 tree = bot.tree
 
 # ==============================
-# IMPORTS (after bot init)
+# IMPORT COMMAND MODULES
 # ==============================
 
 from commands.live_commands import register_live_commands
+from commands.discounts import register_discounts_commands
+from commands.free_games import register_free_games_commands
+from commands.membership import register_membership_commands
+from commands.twitch_badges import register_twitch_badges_commands
+
 from services.eventsub_server import create_eventsub_app
 
 # ==============================
-# READY EVENT
+# READY
 # ==============================
 
 @bot.event
@@ -69,12 +74,6 @@ async def health(request):
 
 
 async def start_web_server():
-    """
-    Starts aiohttp server for:
-    - Twitch EventSub webhook
-    - Health check endpoint
-    """
-
     app = await create_eventsub_app(bot)
 
     app.router.add_get("/", health)
@@ -94,17 +93,20 @@ async def start_web_server():
 
     logger.info("Web server running on port %s", port)
 
-
 # ==============================
 # MAIN
 # ==============================
 
 async def main():
 
-    # Register slash commands
+    # Register all slash command groups
     register_live_commands(bot)
+    register_discounts_commands(bot)
+    register_free_games_commands(bot)
+    register_membership_commands(bot)
+    register_twitch_badges_commands(bot)
 
-    # Start webhook server BEFORE bot login
+    # Start webhook server
     await start_web_server()
 
     # Start Discord bot
