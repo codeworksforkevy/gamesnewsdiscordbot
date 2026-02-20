@@ -1,9 +1,9 @@
 from bs4 import BeautifulSoup
 
-LUNA_URL = "https://gaming.amazon.com/home"
+LUNA_URL = "https://luna.amazon.com/"
 
 
-async def fetch_luna_free(session):
+async def fetch_luna_membership(session):
     try:
         async with session.get(LUNA_URL, timeout=15) as resp:
             if resp.status != 200:
@@ -15,26 +15,23 @@ async def fetch_luna_free(session):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-    offers = []
 
-    # Amazon DOM çok değişken olduğu için geniş selector
-    cards = soup.find_all("img")
+    games = []
 
-    for img in cards:
-        alt = img.get("alt")
-        src = img.get("src")
+    # Bu selector Luna sayfasına göre değişebilir
+    cards = soup.select("img")
 
-        if not alt or not src:
+    for img in cards[:10]:
+        title = img.get("alt")
+        thumbnail = img.get("src")
+
+        if not title or not thumbnail:
             continue
 
-        if "game" in alt.lower():
-            offers.append({
-                "platform": "luna",
-                "title": alt.strip(),
-                "url": LUNA_URL,
-                "thumbnail": src
-            })
+        games.append({
+            "title": title.strip(),
+            "thumbnail": thumbnail
+        })
 
-    print("Luna games fetched:", len(offers))
-    return offers
-
+    print("Luna games fetched:", len(games))
+    return games
