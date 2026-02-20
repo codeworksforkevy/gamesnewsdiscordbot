@@ -11,7 +11,6 @@ from discord.ext import commands
 # ==============================
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN missing")
@@ -28,29 +27,38 @@ logging.basicConfig(
 logger = logging.getLogger("find-a-curie")
 
 # ==============================
-# DISCORD
+# DISCORD SETUP
 # ==============================
 
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
+
 tree = bot.tree
 
 # ==============================
-# IMPORTS
+# IMPORTS (after bot init)
 # ==============================
 
 from commands.live_commands import register_live_commands
 from services.eventsub_server import create_eventsub_app
 
 # ==============================
-# READY
+# READY EVENT
 # ==============================
 
 @bot.event
 async def on_ready():
     logger.info("Bot ready: %s", bot.user)
-    await tree.sync()
-    logger.info("Global sync complete.")
+
+    try:
+        synced = await tree.sync()
+        logger.info("Global sync complete (%s commands).", len(synced))
+    except Exception as e:
+        logger.exception("Slash sync failed: %s", e)
 
 # ==============================
 # WEB SERVER
@@ -59,9 +67,15 @@ async def on_ready():
 async def health(request):
     return web.json_response({"status": "ok"})
 
+
 async def start_web_server():
-    # 🔥 IMPORTANT: await burada zorunlu
-    app = await create_eventsub_app(bot, CHANNEL_ID)
+    """
+    Starts aiohttp server for:
+    - Twitch EventSub webhook
+    - Health check endpoint
+    """
+
+    app = await create_eventsub_app(bot)
 
     app.router.add_get("/", health)
 
@@ -69,19 +83,33 @@ async def start_web_server():
     await runner.setup()
 
     port = int(os.getenv("PORT", "8080"))
-    site = web.TCPSite(runner, "0.0.0.0", port)
+
+    site = web.TCPSite(
+        runner,
+        host="0.0.0.0",
+        port=port
+    )
+
     await site.start()
 
     logger.info("Web server running on port %s", port)
+
 
 # ==============================
 # MAIN
 # ==============================
 
 async def main():
+
+    # Register slash commands
     register_live_commands(bot)
+
+    # Start webhook server BEFORE bot login
     await start_web_server()
+
+    # Start Discord bot
     await bot.start(DISCORD_TOKEN)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
