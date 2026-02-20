@@ -37,18 +37,20 @@ bot = commands.Bot(
     intents=intents
 )
 
-tree = bot.tree
-
 # ==============================
-# IMPORTS
+# IMPORT COMMAND MODULES
 # ==============================
 
 from commands.live_commands import register_live_commands
-from commands.discounts import register_discounts
+from commands.discounts import register as register_discounts
+from commands.free_games import register as register_free_games
+from commands.membership import register as register_membership
+from commands.twitch_badges import register as register_twitch_badges
+
 from services.eventsub_server import create_eventsub_app
 
 # ==============================
-# READY
+# READY EVENT
 # ==============================
 
 @bot.event
@@ -56,13 +58,13 @@ async def on_ready():
     logger.info("Bot ready: %s", bot.user)
 
     try:
-        synced = await tree.sync()
+        synced = await bot.tree.sync()
         logger.info("Global sync complete (%s commands).", len(synced))
     except Exception as e:
         logger.exception("Slash sync failed: %s", e)
 
 # ==============================
-# WEB SERVER
+# WEB SERVER (EventSub)
 # ==============================
 
 async def health(request):
@@ -89,7 +91,6 @@ async def start_web_server():
 
     logger.info("Web server running on port %s", port)
 
-
 # ==============================
 # MAIN
 # ==============================
@@ -98,14 +99,17 @@ async def main():
 
     async with ClientSession() as session:
 
-        # Register commands
+        # ---- Register Commands ----
         register_live_commands(bot)
         await register_discounts(bot, session)
+        await register_free_games(bot, session)
+        await register_membership(bot, session)
+        await register_twitch_badges(bot, session)
 
-        # Start webhook server
+        # ---- Start Webhook Server ----
         await start_web_server()
 
-        # Start bot
+        # ---- Start Discord Bot ----
         await bot.start(DISCORD_TOKEN)
 
 
