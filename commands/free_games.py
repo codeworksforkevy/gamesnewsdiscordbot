@@ -6,9 +6,12 @@ from config import PLATFORM_COLORS
 CACHE_FILE = "data/free_games_cache.json"
 
 
-async def register_free_games(tree):
+async def register_free_games(bot, session=None):
 
-    @tree.command(name="freegames", description="Show cached free games")
+    @bot.tree.command(
+        name="freegames",
+        description="Show cached free games"
+    )
     async def freegames(interaction: discord.Interaction):
 
         await interaction.response.defer()
@@ -16,14 +19,20 @@ async def register_free_games(tree):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except:
-            await interaction.followup.send("Cache not available.", ephemeral=True)
+        except Exception:
+            await interaction.followup.send(
+                "Cache not available.",
+                ephemeral=True
+            )
             return
 
         games = data.get("games", [])
 
         if not games:
-            await interaction.followup.send("No free games found.", ephemeral=True)
+            await interaction.followup.send(
+                "No free games found.",
+                ephemeral=True
+            )
             return
 
         for game in games:
