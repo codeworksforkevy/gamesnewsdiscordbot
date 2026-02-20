@@ -7,9 +7,9 @@ from config import PLATFORM_COLORS
 CACHE_FILE = Path("data/twitch_badges_cache.json")
 
 
-async def register_twitch_badges(tree):
+async def register(bot, session=None):
 
-    @tree.command(
+    @bot.tree.command(
         name="twitch_badges",
         description="Show official Twitch global badges"
     )
@@ -41,7 +41,10 @@ async def register_twitch_badges(tree):
             desc_block = ""
 
             for badge in chunk:
-                desc_block += f"**{badge.get('title','Unknown')}**\n{badge.get('description','')}\n\n"
+                desc_block += (
+                    f"**{badge.get('title','Unknown')}**\n"
+                    f"{badge.get('description','')}\n\n"
+                )
 
             embed = discord.Embed(
                 title="👩‍💻 Global Badges",
