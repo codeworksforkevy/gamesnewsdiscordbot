@@ -12,10 +12,6 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 
 async def create_subscription(broadcaster_id: str, sub_type: str):
 
-    if not PUBLIC_BASE_URL:
-        logger.error("PUBLIC_BASE_URL missing")
-        return False
-
     callback_url = f"{PUBLIC_BASE_URL}/twitch/eventsub"
 
     url = "https://api.twitch.tv/helix/eventsub/subscriptions"
@@ -45,7 +41,7 @@ async def create_subscription(broadcaster_id: str, sub_type: str):
             text = await resp.text()
 
             if resp.status in (200, 202):
-                logger.info("Subscription created: %s for %s", sub_type, broadcaster_id)
+                logger.info("Subscription created: %s", sub_type)
                 return True
             else:
                 logger.error("Subscription failed (%s): %s", resp.status, text)
