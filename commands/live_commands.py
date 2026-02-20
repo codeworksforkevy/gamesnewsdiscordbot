@@ -2,7 +2,9 @@ import json
 import os
 import discord
 from discord import app_commands
+
 from services.twitch_api import resolve_user
+from services.eventsub_manager import ensure_stream_subscriptions
 
 DATA_FILE = "data/streamers.json"
 
@@ -43,7 +45,7 @@ def has_permission(interaction: discord.Interaction):
 
 
 # ==================================================
-# REGISTER
+# REGISTER COMMANDS
 # ==================================================
 
 def register_live_commands(bot: discord.Client):
@@ -83,17 +85,20 @@ def register_live_commands(bot: discord.Client):
         channel_id = interaction.channel_id
         twitch_id = user["id"]
 
+        # Ensure guild container exists
         if guild_id not in data["guilds"]:
             data["guilds"][guild_id] = {"streamers": {}}
 
         guild_streamers = data["guilds"][guild_id]["streamers"]
 
+        # Duplicate check
         if twitch_id in guild_streamers:
             await interaction.followup.send(
                 "This Twitch channel is already being followed in this server."
             )
             return
 
+        # Save streamer
         guild_streamers[twitch_id] = {
             "login": user["login"],
             "display_name": user["display_name"],
@@ -102,6 +107,13 @@ def register_live_commands(bot: discord.Client):
         }
 
         save_streamers(data)
+
+        # 🔥 Create EventSub subscriptions
+        try:
+            await ensure_stream_subscriptions(twitch_id)
+        except Exception as e:
+            # Subscription failure should not break command
+            print(f"Subscription error: {e}")
 
         await interaction.followup.send(
             f"""👩‍💻 **Live Tracking Enabled**
@@ -154,7 +166,9 @@ You will no longer receive live notifications."""
                 )
                 return
 
-        await interaction.followup.send("Twitch channel not found in this server.")
+        await interaction.followup.send(
+            "Twitch channel not found in this server."
+        )
 
     # --------------------------------------------------
     # LIST
