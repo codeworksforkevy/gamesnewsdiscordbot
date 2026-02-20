@@ -13,9 +13,16 @@ DATA_FILE = "data/streamers.json"
 
 def load_streamers():
     if not os.path.exists(DATA_FILE):
-        return {}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return {"guilds": {}}
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if "guilds" not in data:
+                return {"guilds": {}}
+            return data
+    except Exception:
+        return {"guilds": {}}
 
 
 def save_streamers(data):
@@ -36,10 +43,10 @@ def has_permission(interaction: discord.Interaction):
 
 
 # ==================================================
-# REGISTER COMMANDS
+# REGISTER
 # ==================================================
 
-def register_live_commands(bot):
+def register_live_commands(bot: discord.Client):
 
     group = app_commands.Group(
         name="live",
@@ -72,24 +79,36 @@ def register_live_commands(bot):
 
         data = load_streamers()
 
-        if user["id"] in data:
-            await interaction.followup.send("This channel is already being followed.")
+        guild_id = str(interaction.guild_id)
+        channel_id = interaction.channel_id
+        twitch_id = user["id"]
+
+        if guild_id not in data["guilds"]:
+            data["guilds"][guild_id] = {"streamers": {}}
+
+        guild_streamers = data["guilds"][guild_id]["streamers"]
+
+        if twitch_id in guild_streamers:
+            await interaction.followup.send(
+                "This Twitch channel is already being followed in this server."
+            )
             return
 
-        data[user["id"]] = user
+        guild_streamers[twitch_id] = {
+            "login": user["login"],
+            "display_name": user["display_name"],
+            "channel_id": channel_id,
+            "is_live": False
+        }
+
         save_streamers(data)
 
         await interaction.followup.send(
-            f"""👩‍💻 **Begin following a Twitch channel’s live sessions**
+            f"""👩‍💻 **Live Tracking Enabled**
 
-**{user['display_name']}** is now being followed.
-You will receive automatic notifications when they go live.
+Now tracking **{user['display_name']}** in this channel.
 
-🇳🇱 **Dutch**
-👩‍💻 Begin met het volgen van de live sessies van **{user['display_name']}**.
-Je ontvangt automatisch een melding wanneer het kanaal live gaat.
-
-Need help? Ask Sim for guidance."""
+You will automatically receive a notification when they go live."""
         )
 
     # --------------------------------------------------
@@ -112,28 +131,30 @@ Need help? Ask Sim for guidance."""
         await interaction.response.defer(ephemeral=True)
 
         data = load_streamers()
+        guild_id = str(interaction.guild_id)
 
-        for sid, info in list(data.items()):
+        if guild_id not in data["guilds"]:
+            await interaction.followup.send("No channels are being followed here.")
+            return
+
+        guild_streamers = data["guilds"][guild_id]["streamers"]
+
+        for twitch_id, info in list(guild_streamers.items()):
             if info["login"].lower() == login.lower():
 
-                del data[sid]
+                del guild_streamers[twitch_id]
                 save_streamers(data)
 
                 await interaction.followup.send(
-                    f"""🧑‍💻 **Stop following a Twitch channel’s live sessions**
+                    f"""🧑‍💻 **Live Tracking Disabled**
 
-**{info['display_name']}** is no longer being followed.
-Live notifications have been disabled.
+Stopped following **{info['display_name']}**.
 
-🇳🇱 **Dutch**
-🧑‍💻 Stop met het volgen van de live sessies van **{info['display_name']}**.
-Live meldingen zijn uitgeschakeld.
-
-Need help? Ask Sim for guidance."""
+You will no longer receive live notifications."""
                 )
                 return
 
-        await interaction.followup.send("Twitch channel not found.")
+        await interaction.followup.send("Twitch channel not found in this server.")
 
     # --------------------------------------------------
     # LIST
@@ -146,20 +167,30 @@ Need help? Ask Sim for guidance."""
     async def list_cmd(interaction: discord.Interaction):
 
         data = load_streamers()
+        guild_id = str(interaction.guild_id)
 
-        if not data:
+        if guild_id not in data["guilds"]:
             await interaction.response.send_message(
                 "No Twitch channels are currently being followed.",
                 ephemeral=True
             )
             return
 
-        names = [v["display_name"] for v in data.values()]
+        guild_streamers = data["guilds"][guild_id]["streamers"]
+
+        if not guild_streamers:
+            await interaction.response.send_message(
+                "No Twitch channels are currently being followed.",
+                ephemeral=True
+            )
+            return
+
+        names = [v["display_name"] for v in guild_streamers.values()]
 
         embed = discord.Embed(
             title="💻 Followed Twitch Channels",
             description="\n".join(f"• {n}" for n in names),
-            color=0x9146FF  # Twitch purple
+            color=0x9146FF
         )
 
         embed.set_footer(text="Find a Curie • Live Monitoring")
@@ -179,41 +210,31 @@ Need help? Ask Sim for guidance."""
         embed = discord.Embed(
             title="📡 Live Notification System",
             description=(
-                "This feature allows the bot to automatically notify this server "
-                "whenever selected Twitch channels go live."
+                "Automatically notifies this server when selected Twitch "
+                "channels go live."
             ),
             color=0x9146FF
         )
 
         embed.add_field(
             name="👩‍💻 /live add <login>",
-            value="Begin following a Twitch channel’s live sessions.",
+            value="Start tracking a Twitch channel.",
             inline=False
         )
 
         embed.add_field(
             name="🧑‍💻 /live remove <login>",
-            value="Stop following a Twitch channel’s live sessions.",
+            value="Stop tracking a Twitch channel.",
             inline=False
         )
 
         embed.add_field(
             name="💻 /live list",
-            value="View all followed Twitch channels.",
+            value="View tracked Twitch channels in this server.",
             inline=False
         )
 
-        embed.add_field(
-            name="🇳🇱 Dutch",
-            value=(
-                "Deze functie stuurt automatisch meldingen wanneer geselecteerde "
-                "Twitch-kanalen live gaan.\n\n"
-                "Alleen beheerders of moderators mogen de lijst aanpassen."
-            ),
-            inline=False
-        )
-
-        embed.set_footer(text="Need help? Ask Sim for guidance.")
+        embed.set_footer(text="Admin or Manage Server permission required.")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
