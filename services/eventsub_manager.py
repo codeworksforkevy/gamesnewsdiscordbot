@@ -2,15 +2,22 @@ import os
 import aiohttp
 import logging
 
+from services.twitch_api import get_app_access_token
+
 logger = logging.getLogger("eventsub-manager")
 
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
-TWITCH_ACCESS_TOKEN = os.getenv("TWITCH_ACCESS_TOKEN")
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 
 
 async def create_subscription(broadcaster_id: str, sub_type: str):
+
+    token = await get_app_access_token()
+
+    if not token:
+        logger.error("Could not obtain Twitch app access token.")
+        return False
 
     callback_url = f"{PUBLIC_BASE_URL}/twitch/eventsub"
 
@@ -31,7 +38,7 @@ async def create_subscription(broadcaster_id: str, sub_type: str):
 
     headers = {
         "Client-ID": TWITCH_CLIENT_ID,
-        "Authorization": f"Bearer {TWITCH_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
