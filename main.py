@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 import asyncio
 import logging
-from aiohttp import web
+from aiohttp import web, ClientSession
 import discord
 from discord.ext import commands
 
@@ -40,15 +40,11 @@ bot = commands.Bot(
 tree = bot.tree
 
 # ==============================
-# IMPORT COMMAND MODULES
+# IMPORTS
 # ==============================
 
 from commands.live_commands import register_live_commands
-from commands.discounts import register_discounts_commands
-from commands.free_games import register_free_games_commands
-from commands.membership import register_membership_commands
-from commands.twitch_badges import register_twitch_badges_commands
-
+from commands.discounts import register_discounts
 from services.eventsub_server import create_eventsub_app
 
 # ==============================
@@ -93,24 +89,24 @@ async def start_web_server():
 
     logger.info("Web server running on port %s", port)
 
+
 # ==============================
 # MAIN
 # ==============================
 
 async def main():
 
-    # Register all slash command groups
-    register_live_commands(bot)
-    register_discounts_commands(bot)
-    register_free_games_commands(bot)
-    register_membership_commands(bot)
-    register_twitch_badges_commands(bot)
+    async with ClientSession() as session:
 
-    # Start webhook server
-    await start_web_server()
+        # Register commands
+        register_live_commands(bot)
+        await register_discounts(bot, session)
 
-    # Start Discord bot
-    await bot.start(DISCORD_TOKEN)
+        # Start webhook server
+        await start_web_server()
+
+        # Start bot
+        await bot.start(DISCORD_TOKEN)
 
 
 if __name__ == "__main__":
