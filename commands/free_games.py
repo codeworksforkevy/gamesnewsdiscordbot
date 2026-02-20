@@ -1,12 +1,11 @@
 import json
 import discord
-from discord import app_commands
 from config import PLATFORM_COLORS
 
 CACHE_FILE = "data/free_games_cache.json"
 
 
-async def register_free_games(bot, session=None):
+async def register(bot, session=None):
 
     @bot.tree.command(
         name="freegames",
@@ -40,12 +39,17 @@ async def register_free_games(bot, session=None):
             embed = discord.Embed(
                 title=game["title"],
                 url=game["url"],
-                color=PLATFORM_COLORS.get(game["platform"], 0xFFFFFF)
+                color=PLATFORM_COLORS.get(
+                    game.get("platform"),
+                    0xFFFFFF
+                )
             )
 
             if game.get("thumbnail"):
                 embed.set_thumbnail(url=game["thumbnail"])
 
-            embed.set_footer(text=game["platform"].upper())
+            embed.set_footer(
+                text=game.get("platform", "").upper()
+            )
 
             await interaction.followup.send(embed=embed)
