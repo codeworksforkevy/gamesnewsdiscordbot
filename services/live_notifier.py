@@ -26,8 +26,11 @@ def load_streamers():
 
 
 def save_streamers(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error("Failed to save streamers.json: %s", e)
 
 
 # ==================================================
@@ -60,7 +63,7 @@ async def notify_live(bot, channel_id, event):
 
         info = streamers[broadcaster_id]
 
-        # Duplicate protection via persistent state
+        # Duplicate protection
         if info.get("is_live"):
             logger.info("Already marked live, skipping duplicate.")
             continue
@@ -69,11 +72,29 @@ async def notify_live(bot, channel_id, event):
         channel = bot.get_channel(discord_channel_id)
 
         if not channel:
-            logger.warning("Channel not found: %s", discord_channel_id)
+            logger.warning("Channel not found: %s (Guild %s)", discord_channel_id, guild_id)
             continue
 
         # -------------------------------------------------
-        # Build Simple Premium Embed
+        # PERMISSION CHECK (Pre-flight)
+        # -------------------------------------------------
+
+        perms = channel.permissions_for(channel.guild.me)
+
+        if not perms.view_channel:
+            logger.error("Bot cannot view channel %s in guild %s", discord_channel_id, guild_id)
+            continue
+
+        if not perms.send_messages:
+            logger.error("Bot cannot send messages in channel %s (Guild %s)", discord_channel_id, guild_id)
+            continue
+
+        if not perms.embed_links:
+            logger.error("Bot cannot embed links in channel %s (Guild %s)", discord_channel_id, guild_id)
+            continue
+
+        # -------------------------------------------------
+        # BUILD EMBED
         # -------------------------------------------------
 
         embed = discord.Embed(
@@ -86,6 +107,10 @@ async def notify_live(bot, channel_id, event):
 
         embed.set_footer(text="Twitch Live Notification")
 
+        # -------------------------------------------------
+        # SEND
+        # -------------------------------------------------
+
         try:
             await channel.send(embed=embed)
 
@@ -93,10 +118,29 @@ async def notify_live(bot, channel_id, event):
             info["is_live"] = True
             save_streamers(registry)
 
-            logger.info("Live notification sent for %s", display_name)
+            logger.info(
+                "Live notification sent | Guild: %s | Channel: %s | Streamer: %s",
+                guild_id,
+                discord_channel_id,
+                display_name
+            )
 
-        except Exception as e:
-            logger.error("Failed to send live notification: %s", e)
+        except discord.Forbidden as e:
+            logger.error("FORBIDDEN while sending live notification")
+            logger.error("Guild ID: %s", guild_id)
+            logger.error("Channel ID: %s", discord_channel_id)
+            logger.error("Channel Name: %s", getattr(channel, "name", "Unknown"))
+            logger.error("Bot Permissions: %s", perms)
+            logger.error("Error: %s", e)
+
+        except discord.HTTPException as e:
+            logger.error("HTTPException while sending live notification")
+            logger.error("Guild ID: %s", guild_id)
+            logger.error("Channel ID: %s", discord_channel_id)
+            logger.error("Error: %s", e)
+
+        except Exception:
+            logger.exception("Unexpected error while sending live notification")
 
 
 # ==================================================
@@ -118,6 +162,6 @@ async def mark_offline(event):
 
         if broadcaster_id in streamers:
             streamers[broadcaster_id]["is_live"] = False
+            logger.info("Live state reset for %s in guild %s", broadcaster_id, guild_id)
 
     save_streamers(registry)
-    logger.info("Live state reset for %s", broadcaster_id)
