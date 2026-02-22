@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import os
 import asyncio
 import logging
@@ -48,6 +49,7 @@ from commands.membership import register as register_membership
 from commands.twitch_badges import register as register_twitch_badges
 
 from services.eventsub_server import create_eventsub_app
+from services.db import init_db  # ✅ NEW (PostgreSQL init)
 
 # ==============================
 # READY EVENT
@@ -60,8 +62,8 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         logger.info("Global sync complete (%s commands).", len(synced))
-    except Exception as e:
-        logger.exception("Slash sync failed: %s", e)
+    except Exception:
+        logger.exception("Slash sync failed")
 
 # ==============================
 # WEB SERVER (EventSub)
@@ -97,19 +99,34 @@ async def start_web_server():
 
 async def main():
 
+    # ---------------------------
+    # 1️⃣ INIT DATABASE FIRST
+    # ---------------------------
+    await init_db()
+    logger.info("Database ready")
+
+    # ---------------------------
+    # 2️⃣ CREATE HTTP SESSION
+    # ---------------------------
     async with ClientSession() as session:
 
-        # ---- Register Commands ----
+        # -----------------------
+        # 3️⃣ REGISTER COMMANDS
+        # -----------------------
         register_live_commands(bot)
         await register_discounts(bot, session)
         await register_free_games(bot, session)
         await register_membership(bot, session)
         await register_twitch_badges(bot, session)
 
-        # ---- Start Webhook Server ----
+        # -----------------------
+        # 4️⃣ START WEBHOOK SERVER
+        # -----------------------
         await start_web_server()
 
-        # ---- Start Discord Bot ----
+        # -----------------------
+        # 5️⃣ START DISCORD BOT
+        # -----------------------
         await bot.start(DISCORD_TOKEN)
 
 
