@@ -1,101 +1,49 @@
 import discord
-import json
-import os
 import logging
 import datetime
 
+from services.streamer_registry import (
+    get_guilds_for_streamer,
+    set_live_state
+)
+
 logger = logging.getLogger("live-notifier")
 
-DATA_FILE = "data/streamers.json"
-
 
 # ==================================================
-# STORAGE
+# LIVE NOTIFIER
 # ==================================================
 
-def load_streamers():
-    if not os.path.exists(DATA_FILE):
-        return {"guilds": {}}
-
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error("Failed to load streamers.json: %s", e)
-        return {"guilds": {}}
-
-
-def save_streamers(data):
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error("Failed to save streamers.json: %s", e)
-
-
-# ==================================================
-# LIVE NOTIFIER (EventSub stream.online)
-# ==================================================
-
-async def notify_live(bot, channel_id, event):
-    """
-    event = Twitch EventSub event payload
-    """
+async def notify_live(bot, event):
 
     broadcaster_id = event.get("broadcaster_user_id")
     display_name = event.get("broadcaster_user_name")
     login = event.get("broadcaster_user_login")
 
     if not broadcaster_id:
-        logger.warning("No broadcaster_user_id in event.")
         return
 
-    registry = load_streamers()
-    guilds = registry.get("guilds", {})
+    rows = await get_guilds_for_streamer(broadcaster_id)
 
-    # Multi-guild scan
-    for guild_id, guild_data in guilds.items():
+    for row in rows:
+        guild_id = row["guild_id"]
+        channel_id = int(row["channel_id"])
+        is_live = row["is_live"]
 
-        streamers = guild_data.get("streamers", {})
-
-        if broadcaster_id not in streamers:
+        if is_live:
             continue
 
-        info = streamers[broadcaster_id]
-
-        # Duplicate protection
-        if info.get("is_live"):
-            logger.info("Already marked live, skipping duplicate.")
-            continue
-
-        discord_channel_id = info.get("channel_id")
-        channel = bot.get_channel(discord_channel_id)
+        channel = bot.get_channel(channel_id)
 
         if not channel:
-            logger.warning("Channel not found: %s (Guild %s)", discord_channel_id, guild_id)
+            logger.warning("Channel not found: %s", channel_id)
             continue
-
-        # -------------------------------------------------
-        # PERMISSION CHECK (Pre-flight)
-        # -------------------------------------------------
 
         perms = channel.permissions_for(channel.guild.me)
 
-        if not perms.view_channel:
-            logger.error("Bot cannot view channel %s in guild %s", discord_channel_id, guild_id)
+        if not (perms.send_messages and perms.embed_links):
+            logger.error("Missing permissions in channel %s", channel_id)
             continue
-
-        if not perms.send_messages:
-            logger.error("Bot cannot send messages in channel %s (Guild %s)", discord_channel_id, guild_id)
-            continue
-
-        if not perms.embed_links:
-            logger.error("Bot cannot embed links in channel %s (Guild %s)", discord_channel_id, guild_id)
-            continue
-
-        # -------------------------------------------------
-        # BUILD EMBED
-        # -------------------------------------------------
 
         embed = discord.Embed(
             title=f"🔴 {display_name} is LIVE!",
@@ -107,61 +55,31 @@ async def notify_live(bot, channel_id, event):
 
         embed.set_footer(text="Twitch Live Notification")
 
-        # -------------------------------------------------
-        # SEND
-        # -------------------------------------------------
-
         try:
             await channel.send(embed=embed)
 
-            # Persist live state
-            info["is_live"] = True
-            save_streamers(registry)
+            await set_live_state(guild_id, broadcaster_id, True)
 
-            logger.info(
-                "Live notification sent | Guild: %s | Channel: %s | Streamer: %s",
-                guild_id,
-                discord_channel_id,
-                display_name
-            )
+            logger.info("Live notification sent for %s", display_name)
 
-        except discord.Forbidden as e:
-            logger.error("FORBIDDEN while sending live notification")
-            logger.error("Guild ID: %s", guild_id)
-            logger.error("Channel ID: %s", discord_channel_id)
-            logger.error("Channel Name: %s", getattr(channel, "name", "Unknown"))
-            logger.error("Bot Permissions: %s", perms)
-            logger.error("Error: %s", e)
-
-        except discord.HTTPException as e:
-            logger.error("HTTPException while sending live notification")
-            logger.error("Guild ID: %s", guild_id)
-            logger.error("Channel ID: %s", discord_channel_id)
-            logger.error("Error: %s", e)
-
-        except Exception:
-            logger.exception("Unexpected error while sending live notification")
+        except Exception as e:
+            logger.error("Failed to send live notification: %s", e)
 
 
 # ==================================================
-# OFFLINE RESET (EventSub stream.offline)
+# OFFLINE
 # ==================================================
 
 async def mark_offline(event):
+
     broadcaster_id = event.get("broadcaster_user_id")
 
     if not broadcaster_id:
         return
 
-    registry = load_streamers()
-    guilds = registry.get("guilds", {})
+    rows = await get_guilds_for_streamer(broadcaster_id)
 
-    for guild_id, guild_data in guilds.items():
+    for row in rows:
+        await set_live_state(row["guild_id"], broadcaster_id, False)
 
-        streamers = guild_data.get("streamers", {})
-
-        if broadcaster_id in streamers:
-            streamers[broadcaster_id]["is_live"] = False
-            logger.info("Live state reset for %s in guild %s", broadcaster_id, guild_id)
-
-    save_streamers(registry)
+    logger.info("Live state reset for %s", broadcaster_id)
