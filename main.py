@@ -53,6 +53,9 @@ from commands.free_games import register as register_free_games
 from commands.membership import register as register_membership
 from commands.twitch_badges import register as register_twitch_badges
 
+# ✅ NEW
+from commands.utilities.register import register_utilities
+
 # ==============================
 # READY EVENT
 # ==============================
@@ -105,7 +108,7 @@ async def free_games_loop(session):
         except Exception as e:
             logger.error("Free games update failed: %s", e)
 
-        await asyncio.sleep(1800)  # 30 minutes
+        await asyncio.sleep(1800)
 
 # ==============================
 # MAIN
@@ -126,7 +129,10 @@ async def main():
         await register_membership(bot, session)
         await register_twitch_badges(bot, session)
 
-        # 3️⃣ START FREE GAME BACKGROUND UPDATER
+        # ✅ Utilities group
+        await register_utilities(bot)
+
+        # 3️⃣ START FREE GAME LOOP
         asyncio.create_task(free_games_loop(session))
 
         # 4️⃣ START EVENTSUB SERVER
