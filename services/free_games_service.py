@@ -17,9 +17,9 @@ HEADERS = {
 }
 
 
-# ----------------------------------------------------
-# STEAM FETCH (Hardened)
-# ----------------------------------------------------
+# =========================================================
+# FETCH FROM STEAM
+# =========================================================
 
 async def fetch_free_games_from_source(session: aiohttp.ClientSession):
 
@@ -41,7 +41,6 @@ async def fetch_free_games_from_source(session: aiohttp.ClientSession):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-
     rows = soup.select(".search_result_row")
 
     if not rows:
@@ -50,7 +49,7 @@ async def fetch_free_games_from_source(session: aiohttp.ClientSession):
 
     offers = []
 
-    for row in rows[:15]:  # limit to 15
+    for row in rows[:15]:
 
         title_el = row.select_one(".title")
         img_el = row.select_one("img")
@@ -62,8 +61,7 @@ async def fetch_free_games_from_source(session: aiohttp.ClientSession):
         url = row.get("href")
         thumbnail = img_el["src"] if img_el else None
 
-        # Extra safety
-        if not url or "store.steampowered.com" not in url:
+        if not url:
             continue
 
         offers.append({
@@ -73,5 +71,53 @@ async def fetch_free_games_from_source(session: aiohttp.ClientSession):
             "thumbnail": thumbnail
         })
 
-    logger.info("Steam fetched %s free games", len(offers))
+    logger.info("Steam fetched %s games", len(offers))
     return offers
+
+
+# =========================================================
+# UPDATE DATABASE CACHE
+# =========================================================
+
+async def update_free_games_cache(session):
+
+    pool = get_pool()
+
+    games = await fetch_free_games_from_source(session)
+
+    if not games:
+        logger.warning("No games fetched from source.")
+        return
+
+    async with pool.acquire() as conn:
+
+        for g in games:
+            await conn.execute("""
+                INSERT INTO free_games (platform, title, url, thumbnail)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (platform, title)
+                DO UPDATE SET
+                    url = EXCLUDED.url,
+                    thumbnail = EXCLUDED.thumbnail,
+                    updated_at = NOW();
+            """, g["platform"], g["title"], g["url"], g["thumbnail"])
+
+    logger.info("Free games cache updated (%s items)", len(games))
+
+
+# =========================================================
+# READ FROM DATABASE
+# =========================================================
+
+async def get_cached_free_games():
+
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT platform, title, url, thumbnail
+            FROM free_games
+            ORDER BY updated_at DESC
+        """)
+
+    return [dict(r) for r in rows]
