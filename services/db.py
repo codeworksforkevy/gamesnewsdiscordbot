@@ -18,6 +18,10 @@ async def init_db():
     _pool = await asyncpg.create_pool(DATABASE_URL)
 
     async with _pool.acquire() as conn:
+
+        # -----------------------------
+        # STREAMERS TABLE
+        # -----------------------------
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS streamers (
                 guild_id TEXT NOT NULL,
@@ -28,8 +32,22 @@ async def init_db():
             );
         """)
 
-    logger.info("Database initialized")
+        # -----------------------------
+        # FREE GAMES TABLE
+        # -----------------------------
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS free_games (
+                platform TEXT NOT NULL,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                thumbnail TEXT,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (platform, title)
+            );
+        """)
+
+    logger.info("Database initialized (streamers + free_games)")
 
 
-async def get_pool():
+def get_pool():
     return _pool
