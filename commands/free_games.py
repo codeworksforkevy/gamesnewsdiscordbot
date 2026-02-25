@@ -1,31 +1,26 @@
-import json
 import discord
+from discord import app_commands
+from services.free_games_service import (
+    update_free_games_cache,
+    get_cached_free_games
+)
 from config import PLATFORM_COLORS
 
-CACHE_FILE = "data/free_games_cache.json"
 
-
-async def register(bot, session=None):
+async def register(bot, session):
 
     @bot.tree.command(
         name="freegames",
-        description="Show cached free games"
+        description="Show current free games"
     )
     async def freegames(interaction: discord.Interaction):
 
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
 
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            await interaction.followup.send(
-                "Cache not available.",
-                ephemeral=True
-            )
-            return
+        # Önce cache'i güncelle (isteğe bağlı)
+        await update_free_games_cache(session)
 
-        games = data.get("games", [])
+        games = await get_cached_free_games()
 
         if not games:
             await interaction.followup.send(
@@ -39,17 +34,12 @@ async def register(bot, session=None):
             embed = discord.Embed(
                 title=game["title"],
                 url=game["url"],
-                color=PLATFORM_COLORS.get(
-                    game.get("platform"),
-                    0xFFFFFF
-                )
+                color=PLATFORM_COLORS.get(game["platform"], 0xFFFFFF)
             )
 
             if game.get("thumbnail"):
                 embed.set_thumbnail(url=game["thumbnail"])
 
-            embed.set_footer(
-                text=game.get("platform", "").upper()
-            )
+            embed.set_footer(text=game["platform"].upper())
 
             await interaction.followup.send(embed=embed)
