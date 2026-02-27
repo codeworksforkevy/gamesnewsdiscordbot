@@ -1,6 +1,6 @@
 import discord
 import logging
-import datetime
+from datetime import datetime, timezone
 
 from services.streamer_registry import (
     get_guilds_for_streamer,
@@ -14,35 +14,60 @@ logger = logging.getLogger("live-notifier")
 # LIVE NOTIFIER
 # ==================================================
 
-async def notify_live(bot, event):
+async def notify_live(bot: discord.Client, guild_id, event: dict):
+    """
+    Sends live notification embed to all registered guild channels.
+
+    Compatible with:
+        notify_live(bot, None, event)
+        notify_live(bot, guild_id, event)
+    """
+
+    if not event:
+        logger.warning("notify_live called without event data.")
+        return
 
     broadcaster_id = event.get("broadcaster_user_id")
     display_name = event.get("broadcaster_user_name")
     login = event.get("broadcaster_user_login")
 
     if not broadcaster_id:
+        logger.warning("Event missing broadcaster_user_id.")
         return
 
     rows = await get_guilds_for_streamer(broadcaster_id)
 
+    if not rows:
+        logger.info("No guilds registered for broadcaster %s", broadcaster_id)
+        return
+
     for row in rows:
-        guild_id = row["guild_id"]
+        row_guild_id = row["guild_id"]
         channel_id = int(row["channel_id"])
         is_live = row["is_live"]
 
+        # Skip if already marked live
         if is_live:
             continue
 
         channel = bot.get_channel(channel_id)
 
+        # Fallback fetch if not cached
         if not channel:
-            logger.warning("Channel not found: %s", channel_id)
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except Exception:
+                logger.warning("Channel not found or inaccessible: %s", channel_id)
+                continue
+
+        if not channel:
             continue
 
+        # Permission check
         perms = channel.permissions_for(channel.guild.me)
 
         if not (perms.send_messages and perms.embed_links):
-            logger.error("Missing permissions in channel %s", channel_id)
+            logger.error("Missing send/embed permissions in channel %s", channel_id)
             continue
 
         embed = discord.Embed(
@@ -50,7 +75,7 @@ async def notify_live(bot, event):
             url=f"https://twitch.tv/{login}",
             description="Click to watch the stream.",
             color=0x9146FF,
-            timestamp=datetime.datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
 
         embed.set_footer(text="Twitch Live Notification")
@@ -58,7 +83,7 @@ async def notify_live(bot, event):
         try:
             await channel.send(embed=embed)
 
-            await set_live_state(guild_id, broadcaster_id, True)
+            await set_live_state(row_guild_id, broadcaster_id, True)
 
             logger.info("Live notification sent for %s", display_name)
 
@@ -67,14 +92,22 @@ async def notify_live(bot, event):
 
 
 # ==================================================
-# OFFLINE
+# OFFLINE HANDLER
 # ==================================================
 
-async def mark_offline(event):
+async def mark_offline(event: dict):
+    """
+    Resets live state when stream goes offline.
+    """
+
+    if not event:
+        logger.warning("mark_offline called without event data.")
+        return
 
     broadcaster_id = event.get("broadcaster_user_id")
 
     if not broadcaster_id:
+        logger.warning("Offline event missing broadcaster_user_id.")
         return
 
     rows = await get_guilds_for_streamer(broadcaster_id)
