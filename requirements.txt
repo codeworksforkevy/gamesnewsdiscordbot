@@ -1,7 +1,10 @@
 discord.py==2.3.2
 aiohttp==3.9.3
-beautifulsoup4==4.12.3
-python-dotenv==1.0.1
+asyncpg==0.29.0
 redis==5.0.1
+beautifulsoup4==4.12.3
+lxml==5.1.0
+python-dotenv==1.0.1
 PyNaCl==1.5.0
-asyncpg
+cryptography==42.0.5
+uvloop==0.19.0 ; sys_platform != "win32"
