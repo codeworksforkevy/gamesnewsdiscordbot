@@ -1,137 +1,210 @@
 import os
-import aiohttp
+import time
 import asyncio
 import logging
-import time
+import aiohttp
 
 logger = logging.getLogger("twitch-api")
-
-TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
-TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 HELIX_BASE = "https://api.twitch.tv/helix"
 
-_app_token = None
-_token_expiry = 0
-_session = None
 
+class TwitchAPI:
 
-# -------------------------------------------------
-# SESSION MANAGEMENT
-# -------------------------------------------------
-async def get_session():
-    global _session
-    if _session is None or _session.closed:
-        _session = aiohttp.ClientSession()
-    return _session
+    def __init__(self, session: aiohttp.ClientSession):
+        self.session = session
 
+        self.client_id = os.getenv("TWITCH_CLIENT_ID")
+        self.client_secret = os.getenv("TWITCH_CLIENT_SECRET")
 
-async def close_session():
-    global _session
-    if _session and not _session.closed:
-        await _session.close()
+        if not self.client_id or not self.client_secret:
+            raise RuntimeError("Twitch credentials missing")
 
+        self._app_token = None
+        self._expiry = 0
+        self._token_lock = asyncio.Lock()
 
-# -------------------------------------------------
-# TOKEN MANAGEMENT (cached + expiry aware)
-# -------------------------------------------------
-async def get_app_token():
-    global _app_token, _token_expiry
+    # ==================================================
+    # TOKEN MANAGEMENT (CONCURRENCY SAFE)
+    # ==================================================
 
-    if _app_token and time.time() < _token_expiry:
-        return _app_token
+    async def get_app_token(self):
 
-    session = await get_session()
+        async with self._token_lock:
 
-    params = {
-        "client_id": TWITCH_CLIENT_ID,
-        "client_secret": TWITCH_CLIENT_SECRET,
-        "grant_type": "client_credentials"
-    }
+            now = time.time()
 
-    async with session.post(TOKEN_URL, params=params) as resp:
-        data = await resp.json()
+            if self._app_token and now < self._expiry:
+                return self._app_token
 
-        if resp.status != 200:
-            logger.error("Failed to obtain Twitch token: %s", data)
+            payload = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "grant_type": "client_credentials"
+            }
+
+            async with self.session.post(TOKEN_URL, data=payload) as resp:
+
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.error("Token request failed: %s", text)
+                    return None
+
+                data = await resp.json()
+
+                self._app_token = data["access_token"]
+                expires_in = data.get("expires_in", 3600)
+
+                # expire slightly early
+                self._expiry = now + expires_in - 60
+
+                logger.info("Twitch app token refreshed.")
+
+                return self._app_token
+
+    # ==================================================
+    # GENERIC HELIX REQUEST (SAFE + RETRY)
+    # ==================================================
+
+    async def helix_request(self, endpoint, params=None, retry=True):
+
+        token = await self.get_app_token()
+        if not token:
             return None
 
-        _app_token = data["access_token"]
-        expires_in = data.get("expires_in", 3600)
+        headers = {
+            "Client-ID": self.client_id,
+            "Authorization": f"Bearer {token}"
+        }
 
-        # expire 60 sec early to be safe
-        _token_expiry = time.time() + expires_in - 60
+        url = f"{HELIX_BASE}/{endpoint}"
 
-        logger.info("Twitch app token refreshed.")
+        async with self.session.get(
+            url,
+            headers=headers,
+            params=params
+        ) as resp:
 
-        return _app_token
+            # Auto refresh on 401
+            if resp.status == 401 and retry:
+                logger.warning("Token expired. Refreshing.")
+                self._app_token = None
+                await self.get_app_token()
+                return await self.helix_request(endpoint, params, retry=False)
 
+            # Rate limit handling
+            if resp.status == 429:
+                retry_after = int(resp.headers.get("Retry-After", 1))
+                logger.warning(
+                    "Rate limited. Sleeping %s seconds.",
+                    retry_after
+                )
+                await asyncio.sleep(retry_after)
+                return await self.helix_request(endpoint, params, retry=False)
 
-# -------------------------------------------------
-# GENERIC HELIX REQUEST
-# -------------------------------------------------
-async def helix_request(endpoint, params=None):
-    token = await get_app_token()
-    if not token:
+            if resp.status != 200:
+                text = await resp.text()
+                logger.error(
+                    "Helix request failed (%s): %s",
+                    resp.status,
+                    text
+                )
+                return None
+
+            return await resp.json()
+
+    # ==================================================
+    # USER RESOLUTION
+    # ==================================================
+
+    async def resolve_user(self, login: str):
+        data = await self.helix_request(
+            "users",
+            {"login": login}
+        )
+
+        if data and data.get("data"):
+            return data["data"][0]
+
         return None
 
-    session = await get_session()
+    async def get_user_by_id(self, user_id: str):
+        data = await self.helix_request(
+            "users",
+            {"id": user_id}
+        )
 
-    headers = {
-        "Client-ID": TWITCH_CLIENT_ID,
-        "Authorization": f"Bearer {token}"
-    }
+        if data and data.get("data"):
+            return data["data"][0]
 
-    url = f"{HELIX_BASE}/{endpoint}"
+        return None
 
-    async with session.get(url, headers=headers, params=params) as resp:
-        data = await resp.json()
+    # ==================================================
+    # STREAM CHECK (SINGLE)
+    # ==================================================
 
-        # Auto refresh on 401
-        if resp.status == 401:
-            logger.warning("Token expired, refreshing...")
-            await get_app_token()
-            return await helix_request(endpoint, params)
+    async def check_stream_live(self, user_id: str):
 
-        if resp.status != 200:
-            logger.error("Helix request failed: %s", data)
-            return None
+        data = await self.helix_request(
+            "streams",
+            {"user_id": user_id}
+        )
 
-        return data
+        if data and data.get("data"):
+            return data["data"][0]
 
+        return None
 
-# -------------------------------------------------
-# USER RESOLUTION
-# -------------------------------------------------
-async def resolve_user(login: str):
-    """
-    Resolve Twitch login -> user object
-    """
-    data = await helix_request("users", {"login": login})
-    if data and data.get("data"):
-        return data["data"][0]
-    return None
+    # ==================================================
+    # STREAM CHECK (BATCH - up to 100)
+    # ==================================================
 
+    async def check_streams_live(self, user_ids: list[str]) -> set[str]:
 
-async def get_user_by_id(user_id: str):
-    """
-    Fetch user object by ID
-    """
-    data = await helix_request("users", {"id": user_id})
-    if data and data.get("data"):
-        return data["data"][0]
-    return None
+        if not user_ids:
+            return set()
 
+        # Twitch supports up to 100 user_id params
+        params = [("user_id", uid) for uid in user_ids[:100]]
 
-# -------------------------------------------------
-# STREAM CHECK
-# -------------------------------------------------
-async def check_stream_live(user_id: str):
-    """
-    Returns stream object if live, else None
-    """
-    data = await helix_request("streams", {"user_id": user_id})
-    if data and data.get("data"):
-        return data["data"][0]
-    return None
+        data = await self.helix_request(
+            "streams",
+            params
+        )
+
+        if not data:
+            return set()
+
+        live_ids = {
+            stream["user_id"]
+            for stream in data.get("data", [])
+        }
+
+        return live_ids
+
+    # ==================================================
+    # BADGES
+    # ==================================================
+
+    async def fetch_badges(self):
+
+        data = await self.helix_request("chat/badges/global")
+
+        if not data:
+            return []
+
+        return data.get("data", [])
+
+    # ==================================================
+    # DROPS
+    # ==================================================
+
+    async def fetch_drops(self):
+
+        data = await self.helix_request("entitlements/drops")
+
+        if not data:
+            return []
+
+        return data.get("data", [])
