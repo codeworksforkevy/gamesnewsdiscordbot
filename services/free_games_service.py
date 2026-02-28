@@ -1,123 +1,43 @@
-import aiohttp
 import logging
-from bs4 import BeautifulSoup
-from services.db import get_pool
+import datetime as dt
 
-logger = logging.getLogger("free-games-service")
-
-STEAM_URL = "https://store.steampowered.com/search/?maxprice=free&specials=1"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/121.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+logger = logging.getLogger("free-games")
 
 
-# =========================================================
-# FETCH FROM STEAM
-# =========================================================
+# ==================================================
+# UPDATE FREE GAMES CACHE
+# ==================================================
 
-async def fetch_free_games_from_source(session: aiohttp.ClientSession):
+async def update_free_games_cache(db, epic, gog, humble, steam, luna):
+    """
+    Stores free games into database cache table.
+    """
 
-    try:
-        async with session.get(
-            STEAM_URL,
-            headers=HEADERS,
-            timeout=20
-        ) as resp:
+    all_games = epic + gog + humble + steam + luna
 
-            if resp.status != 200:
-                logger.error("Steam returned status %s", resp.status)
-                return []
+    payload = {
+        "last_updated": dt.datetime.utcnow().isoformat(),
+        "count": len(all_games),
+        "games": all_games
+    }
 
-            html = await resp.text()
-
-    except Exception as e:
-        logger.error("Steam fetch failed: %s", e)
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
-    rows = soup.select(".search_result_row")
-
-    if not rows:
-        logger.warning("Steam selector returned no rows.")
-        return []
-
-    offers = []
-
-    for row in rows[:15]:
-
-        title_el = row.select_one(".title")
-        img_el = row.select_one("img")
-
-        if not title_el:
-            continue
-
-        title = title_el.text.strip()
-        url = row.get("href")
-        thumbnail = img_el["src"] if img_el else None
-
-        if not url:
-            continue
-
-        offers.append({
-            "platform": "steam",
-            "title": title,
-            "url": url,
-            "thumbnail": thumbnail
-        })
-
-    logger.info("Steam fetched %s games", len(offers))
-    return offers
-
-
-# =========================================================
-# UPDATE DATABASE CACHE
-# =========================================================
-
-async def update_free_games_cache(session):
-
-    pool = get_pool()
-
-    games = await fetch_free_games_from_source(session)
-
-    if not games:
-        logger.warning("No games fetched from source.")
-        return
+    pool = db.get_pool()
 
     async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO free_games_cache (id, payload)
+            VALUES (1, $1)
+            ON CONFLICT (id)
+            DO UPDATE SET payload = EXCLUDED.payload;
+        """, payload)
 
-        for g in games:
-            await conn.execute("""
-                INSERT INTO free_games (platform, title, url, thumbnail)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (platform, title)
-                DO UPDATE SET
-                    url = EXCLUDED.url,
-                    thumbnail = EXCLUDED.thumbnail,
-                    updated_at = NOW();
-            """, g["platform"], g["title"], g["url"], g["thumbnail"])
+    logger.info(
+        "Free games cache updated",
+        extra={
+            "extra_data": {
+                "count": len(all_games)
+            }
+        }
+    )
 
-    logger.info("Free games cache updated (%s items)", len(games))
-
-
-# =========================================================
-# READ FROM DATABASE
-# =========================================================
-
-async def get_cached_free_games():
-
-    pool = get_pool()
-
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT platform, title, url, thumbnail
-            FROM free_games
-            ORDER BY updated_at DESC
-        """)
-
-    return [dict(r) for r in rows]
+    return len(all_games)
