@@ -9,18 +9,22 @@ from aiohttp import web, ClientSession
 import discord
 from discord.ext import commands
 
-# ==============================
+# ==================================================
 # ENV
-# ==============================
+# ==================================================
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN missing")
 
-# ==============================
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL missing")
+
+# ==================================================
 # LOGGING
-# ==============================
+# ==================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,20 +33,21 @@ logging.basicConfig(
 
 logger = logging.getLogger("find-a-curie")
 
-# ==============================
+# ==================================================
 # DISCORD SETUP
-# ==============================
+# ==================================================
 
 intents = discord.Intents.default()
 intents.message_content = False
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==============================
+# ==================================================
 # IMPORTS
-# ==============================
+# ==================================================
 
-from services.db import init_db, get_pool
+from services.db import Database
+from services.state import AppState
 from services.eventsub_server import create_eventsub_app
 from services.free_games_service import update_free_games_cache
 from services.monitor import TwitchMonitor
@@ -55,9 +60,16 @@ from commands.membership import register as register_membership
 from commands.twitch_badges import register as register_twitch_badges
 from commands.utilities.register import register_utilities
 
-# ==============================
+# ==================================================
+# APP STATE
+# ==================================================
+
+app_state = AppState()
+
+
+# ==================================================
 # READY EVENT
-# ==============================
+# ==================================================
 
 @bot.event
 async def on_ready():
@@ -70,13 +82,17 @@ async def on_ready():
         logger.exception("Slash sync failed")
 
 
-# ==============================
+# ==================================================
 # WEB SERVER
-# ==============================
+# ==================================================
 
-async def start_web_server(bot):
-    app = await create_eventsub_app(bot)
-    app.router.add_get("/", lambda r: web.json_response({"status": "ok"}))
+async def start_web_server(bot, app_state: AppState):
+
+    async def health(request):
+        return web.json_response({"status": "ok"})
+
+    app = await create_eventsub_app(bot, app_state)
+    app.router.add_get("/", health)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -90,9 +106,9 @@ async def start_web_server(bot):
     return runner
 
 
-# ==============================
+# ==================================================
 # FREE GAME LOOP
-# ==============================
+# ==================================================
 
 async def free_games_loop(session):
     while True:
@@ -104,22 +120,35 @@ async def free_games_loop(session):
         await asyncio.sleep(1800)
 
 
-# ==============================
+# ==================================================
 # MAIN
-# ==============================
+# ==================================================
 
 async def main():
 
-    await init_db()
-    logger.info("Database ready")
-
-    pool = get_pool()
-
     shutdown_event = asyncio.Event()
+
+    # ------------------------------
+    # DATABASE INIT
+    # ------------------------------
+
+    app_state.db = Database(DATABASE_URL)
+    await app_state.db.connect()
+
+    logger.info("Database ready.")
+
+    pool = app_state.db.get_pool()
+
+    # ------------------------------
+    # HTTP SESSION
+    # ------------------------------
 
     async with ClientSession() as session:
 
-        # Register commands
+        # ------------------------------
+        # REGISTER COMMANDS
+        # ------------------------------
+
         register_live_commands(bot)
         await register_discounts(bot, session)
         await register_free_games(bot, session)
@@ -127,22 +156,31 @@ async def main():
         await register_twitch_badges(bot, session)
         await register_utilities(bot)
 
-        # Background tasks
+        # ------------------------------
+        # BACKGROUND TASKS
+        # ------------------------------
+
         free_task = asyncio.create_task(free_games_loop(session))
 
-        # Monitor
         monitor = TwitchMonitor(
             twitch_api=twitch_api,
             eventsub_manager=eventsub_manager,
             db_pool=pool,
             interval=300
         )
+
         monitor_task = asyncio.create_task(monitor.start())
 
-        # Web server
-        runner = await start_web_server(bot)
+        # ------------------------------
+        # WEB SERVER
+        # ------------------------------
 
-        # Graceful shutdown
+        runner = await start_web_server(bot, app_state)
+
+        # ------------------------------
+        # SIGNAL HANDLING
+        # ------------------------------
+
         loop = asyncio.get_running_loop()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -150,15 +188,28 @@ async def main():
 
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
 
+        # Wait for shutdown
         await shutdown_event.wait()
 
         logger.info("Shutdown signal received.")
+
+        # ------------------------------
+        # CLEAN SHUTDOWN
+        # ------------------------------
 
         free_task.cancel()
         monitor_task.cancel()
         bot_task.cancel()
 
-        await runner.cleanup()
+        try:
+            await runner.cleanup()
+        except Exception:
+            pass
+
+        try:
+            await app_state.db.close()
+        except Exception:
+            pass
 
         logger.info("Shutdown complete.")
 
