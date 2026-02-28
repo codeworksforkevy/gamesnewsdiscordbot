@@ -27,6 +27,8 @@ async def notify_live(bot: discord.Client, guild_id, event: dict):
         logger.warning("notify_live called without event data.")
         return
 
+    db = bot.app_state.db
+
     broadcaster_id = event.get("broadcaster_user_id")
     display_name = event.get("broadcaster_user_name")
     login = event.get("broadcaster_user_login")
@@ -35,39 +37,48 @@ async def notify_live(bot: discord.Client, guild_id, event: dict):
         logger.warning("Event missing broadcaster_user_id.")
         return
 
-    rows = await get_guilds_for_streamer(broadcaster_id)
+    rows = await get_guilds_for_streamer(db, broadcaster_id)
 
     if not rows:
-        logger.info("No guilds registered for broadcaster %s", broadcaster_id)
+        logger.info(
+            "No guilds registered",
+            extra={"extra_data": {"broadcaster_id": broadcaster_id}}
+        )
         return
 
     for row in rows:
+
         row_guild_id = row["guild_id"]
         channel_id = int(row["channel_id"])
         is_live = row["is_live"]
 
-        # Skip if already marked live
+        # Skip if already marked live (race safety)
         if is_live:
             continue
 
         channel = bot.get_channel(channel_id)
 
-        # Fallback fetch if not cached
+        # Fallback fetch
         if not channel:
             try:
                 channel = await bot.fetch_channel(channel_id)
             except Exception:
-                logger.warning("Channel not found or inaccessible: %s", channel_id)
+                logger.warning(
+                    "Channel inaccessible",
+                    extra={"extra_data": {"channel_id": channel_id}}
+                )
                 continue
 
         if not channel:
             continue
 
-        # Permission check
         perms = channel.permissions_for(channel.guild.me)
 
         if not (perms.send_messages and perms.embed_links):
-            logger.error("Missing send/embed permissions in channel %s", channel_id)
+            logger.error(
+                "Missing permissions",
+                extra={"extra_data": {"channel_id": channel_id}}
+            )
             continue
 
         embed = discord.Embed(
@@ -83,19 +94,40 @@ async def notify_live(bot: discord.Client, guild_id, event: dict):
         try:
             await channel.send(embed=embed)
 
-            await set_live_state(row_guild_id, broadcaster_id, True)
+            await set_live_state(
+                db,
+                row_guild_id,
+                broadcaster_id,
+                True
+            )
 
-            logger.info("Live notification sent for %s", display_name)
+            logger.info(
+                "Live notification sent",
+                extra={
+                    "extra_data": {
+                        "broadcaster_id": broadcaster_id,
+                        "guild_id": row_guild_id
+                    }
+                }
+            )
 
         except Exception as e:
-            logger.error("Failed to send live notification: %s", e)
+            logger.error(
+                "Failed to send live notification",
+                extra={
+                    "extra_data": {
+                        "error": str(e),
+                        "channel_id": channel_id
+                    }
+                }
+            )
 
 
 # ==================================================
 # OFFLINE HANDLER
 # ==================================================
 
-async def mark_offline(event: dict):
+async def mark_offline(bot: discord.Client, event: dict):
     """
     Resets live state when stream goes offline.
     """
@@ -104,15 +136,28 @@ async def mark_offline(event: dict):
         logger.warning("mark_offline called without event data.")
         return
 
+    db = bot.app_state.db
+
     broadcaster_id = event.get("broadcaster_user_id")
 
     if not broadcaster_id:
         logger.warning("Offline event missing broadcaster_user_id.")
         return
 
-    rows = await get_guilds_for_streamer(broadcaster_id)
+    rows = await get_guilds_for_streamer(db, broadcaster_id)
+
+    if not rows:
+        return
 
     for row in rows:
-        await set_live_state(row["guild_id"], broadcaster_id, False)
+        await set_live_state(
+            db,
+            row["guild_id"],
+            broadcaster_id,
+            False
+        )
 
-    logger.info("Live state reset for %s", broadcaster_id)
+    logger.info(
+        "Live state reset",
+        extra={"extra_data": {"broadcaster_id": broadcaster_id}}
+    )
