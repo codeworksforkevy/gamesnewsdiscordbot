@@ -26,7 +26,7 @@ class TwitchAPI:
         self._token_lock = asyncio.Lock()
 
     # ==================================================
-    # TOKEN MANAGEMENT (CONCURRENCY SAFE)
+    # TOKEN MANAGEMENT
     # ==================================================
 
     async def get_app_token(self):
@@ -48,7 +48,11 @@ class TwitchAPI:
 
                 if resp.status != 200:
                     text = await resp.text()
-                    logger.error("Token request failed: %s", text)
+                    logger.error(
+                        "Token request failed (%s): %s",
+                        resp.status,
+                        text
+                    )
                     return None
 
                 data = await resp.json()
@@ -56,7 +60,7 @@ class TwitchAPI:
                 self._app_token = data["access_token"]
                 expires_in = data.get("expires_in", 3600)
 
-                # expire slightly early
+                # Expire slightly early
                 self._expiry = now + expires_in - 60
 
                 logger.info("Twitch app token refreshed.")
@@ -64,7 +68,7 @@ class TwitchAPI:
                 return self._app_token
 
     # ==================================================
-    # GENERIC HELIX REQUEST (SAFE + RETRY)
+    # GENERIC HELIX REQUEST
     # ==================================================
 
     async def helix_request(self, endpoint, params=None, retry=True):
@@ -86,18 +90,19 @@ class TwitchAPI:
             params=params
         ) as resp:
 
-            # Auto refresh on 401
+            # 401 → refresh once
             if resp.status == 401 and retry:
-                logger.warning("Token expired. Refreshing.")
+                logger.warning("Helix 401. Refreshing token.")
                 self._app_token = None
                 await self.get_app_token()
                 return await self.helix_request(endpoint, params, retry=False)
 
-            # Rate limit handling
+            # 429 → rate limit
             if resp.status == 429:
                 retry_after = int(resp.headers.get("Retry-After", 1))
                 logger.warning(
-                    "Rate limited. Sleeping %s seconds.",
+                    "Rate limited on %s. Sleeping %s sec.",
+                    endpoint,
                     retry_after
                 )
                 await asyncio.sleep(retry_after)
@@ -106,7 +111,8 @@ class TwitchAPI:
             if resp.status != 200:
                 text = await resp.text()
                 logger.error(
-                    "Helix request failed (%s): %s",
+                    "Helix request failed | endpoint=%s | status=%s | response=%s",
+                    endpoint,
                     resp.status,
                     text
                 )
@@ -165,7 +171,6 @@ class TwitchAPI:
         if not user_ids:
             return set()
 
-        # Twitch supports up to 100 user_id params
         params = [("user_id", uid) for uid in user_ids[:100]]
 
         data = await self.helix_request(
@@ -176,15 +181,13 @@ class TwitchAPI:
         if not data:
             return set()
 
-        live_ids = {
+        return {
             stream["user_id"]
             for stream in data.get("data", [])
         }
 
-        return live_ids
-
     # ==================================================
-    # BADGES
+    # BADGES (SAFE)
     # ==================================================
 
     async def fetch_badges(self):
@@ -197,14 +200,15 @@ class TwitchAPI:
         return data.get("data", [])
 
     # ==================================================
-    # DROPS
+    # DROPS (DISABLED FOR APP TOKEN)
     # ==================================================
 
     async def fetch_drops(self):
-
-        data = await self.helix_request("entitlements/drops")
-
-        if not data:
-            return []
-
-        return data.get("data", [])
+        """
+        entitlements/drops requires user OAuth + scopes.
+        Disabled for app-token architecture.
+        """
+        logger.warning(
+            "Drops endpoint requires user OAuth. Disabled."
+        )
+        return []
