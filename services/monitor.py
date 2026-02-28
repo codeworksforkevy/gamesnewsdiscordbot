@@ -11,7 +11,7 @@ class TwitchMonitor:
         eventsub_manager,
         db_pool,
         telemetry=None,
-        interval=300
+        interval=180  # 3 min default (EventSub real-time olduğu için agresif gerek yok)
     ):
         self.twitch_api = twitch_api
         self.eventsub_manager = eventsub_manager
@@ -63,21 +63,34 @@ class TwitchMonitor:
             await self.refresh_badges()
             await self.check_drops()
 
-            duration = (datetime.now(timezone.utc) - cycle_start).total_seconds()
+            duration = (
+                datetime.now(timezone.utc) - cycle_start
+            ).total_seconds()
 
             if self.telemetry:
-                self.telemetry.record("monitor_cycle_success", duration=duration)
+                self.telemetry.record(
+                    "monitor_cycle_success",
+                    duration=duration
+                )
 
-            self.logger.info("Monitor cycle completed in %.2fs", duration)
+            self.logger.info(
+                "Monitor cycle completed in %.2fs",
+                duration
+            )
 
         except Exception as e:
-            self.logger.exception("Monitor cycle failed: %s", e)
+            self.logger.exception(
+                "Monitor cycle failed: %s",
+                e
+            )
 
             if self.telemetry:
-                self.telemetry.record("monitor_cycle_failure")
+                self.telemetry.record(
+                    "monitor_cycle_failure"
+                )
 
     # ==================================================
-    # EVENTSUB AUDIT
+    # EVENTSUB AUDIT (Self-Healing)
     # ==================================================
 
     async def audit_eventsub_subscriptions(self):
@@ -98,17 +111,19 @@ class TwitchMonitor:
 
         missing = db_ids - active_ids
 
-        for broadcaster_id in missing:
+        if missing:
             self.logger.warning(
-                "Missing EventSub subscription for %s. Re-subscribing.",
-                broadcaster_id
+                "Missing %d EventSub subscriptions.",
+                len(missing)
             )
+
+        for broadcaster_id in missing:
             await self.eventsub_manager.ensure_stream_subscriptions(
                 broadcaster_id
             )
 
     # ==================================================
-    # LIVE STATE RECONCILIATION
+    # LIVE STATE RECONCILIATION (BATCH OPTIMIZED)
     # ==================================================
 
     async def reconcile_live_state(self):
@@ -119,30 +134,40 @@ class TwitchMonitor:
                 FROM streamers;
             """)
 
-        # ⚠ Sequential – later optimize with batch API
-        for row in rows:
+        if not rows:
+            return
 
-            broadcaster_id = row["broadcaster_id"]
-            db_live = row["is_live"]
+        broadcaster_ids = [
+            r["broadcaster_id"] for r in rows
+        ]
 
-            stream = await self.twitch_api.check_stream_live(
-                broadcaster_id
-            )
-            actual_live = stream is not None
+        # 🔥 SINGLE batch Twitch API call (max 100 supported)
+        live_ids = await self.twitch_api.check_streams_live(
+            broadcaster_ids
+        )
 
-            if db_live and not actual_live:
+        # Determine which need reset
+        to_reset = [
+            r["broadcaster_id"]
+            for r in rows
+            if r["is_live"] and r["broadcaster_id"] not in live_ids
+        ]
 
-                self.logger.info(
-                    "Live drift detected for %s. Resetting state.",
-                    broadcaster_id
-                )
+        if not to_reset:
+            return
 
-                async with self.db_pool.acquire() as conn:
-                    await conn.execute("""
-                        UPDATE streamers
-                        SET is_live = FALSE
-                        WHERE broadcaster_id = $1;
-                    """, broadcaster_id)
+        self.logger.info(
+            "Resetting %d drifted live states.",
+            len(to_reset)
+        )
+
+        # 🔥 Single bulk update
+        async with self.db_pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE streamers
+                SET is_live = FALSE
+                WHERE broadcaster_id = ANY($1::text[]);
+            """, to_reset)
 
     # ==================================================
     # BADGE REFRESH
@@ -159,10 +184,11 @@ class TwitchMonitor:
                     count=len(badges)
                 )
 
-            self.logger.info("Badge refresh completed.")
-
         except Exception as e:
-            self.logger.warning("Badge refresh failed: %s", e)
+            self.logger.warning(
+                "Badge refresh failed: %s",
+                e
+            )
 
     # ==================================================
     # DROPS CHECK
@@ -179,7 +205,8 @@ class TwitchMonitor:
                     count=len(drops)
                 )
 
-            self.logger.info("Drops check completed.")
-
         except Exception as e:
-            self.logger.warning("Drops check failed: %s", e)
+            self.logger.warning(
+                "Drops check failed: %s",
+                e
+            )
