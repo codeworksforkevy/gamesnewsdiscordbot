@@ -74,7 +74,13 @@ from services.eventsub_server import create_eventsub_app
 from services.monitor import TwitchMonitor
 from services.twitch_api import TwitchAPI
 from services.eventsub_manager import EventSubManager
+
 from services.free_games_service import update_free_games_cache
+from services.epic import fetch_epic_free
+from services.gog import fetch_gog_free
+from services.humble import fetch_humble_free
+from services.steam import fetch_steam_free
+from services.luna import fetch_luna_free
 
 from commands.live_commands import register_live_commands
 from commands.discounts import register as register_discounts
@@ -99,7 +105,10 @@ bot.logger = logger
 
 @bot.event
 async def on_ready():
-    logger.info("Bot ready", extra={"extra_data": {"user": str(bot.user)}})
+    logger.info(
+        "Bot ready",
+        extra={"extra_data": {"user": str(bot.user)}}
+    )
 
     try:
         synced = await bot.tree.sync()
@@ -108,7 +117,10 @@ async def on_ready():
             extra={"extra_data": {"count": len(synced)}}
         )
     except Exception as e:
-        logger.exception("Slash sync failed", extra={"extra_data": {"error": str(e)}})
+        logger.exception(
+            "Slash sync failed",
+            extra={"extra_data": {"error": str(e)}}
+        )
 
 
 # ==================================================
@@ -127,6 +139,7 @@ async def start_web_server(bot, app_state: AppState, monitor: TwitchMonitor):
 monitor_cycles_total {m['monitor_cycles_total']}
 monitor_cycle_failures {m['monitor_cycle_failures']}
 """
+
         return web.Response(
             text=payload.strip(),
             content_type="text/plain"
@@ -153,14 +166,28 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
 
 
 # ==================================================
-# FREE GAME LOOP
+# FREE GAME LOOP (NEW ARCHITECTURE)
 # ==================================================
 
-async def free_games_loop(session):
+async def free_games_loop(session, db):
 
     while True:
         try:
-            await update_free_games_cache(session)
+            epic = await fetch_epic_free(session)
+            gog = await fetch_gog_free(session)
+            humble = await fetch_humble_free(session)
+            steam = await fetch_steam_free(session)
+            luna = await fetch_luna_free(session)
+
+            await update_free_games_cache(
+                db,
+                epic,
+                gog,
+                humble,
+                steam,
+                luna
+            )
+
         except Exception as e:
             logger.error(
                 "Free games update failed",
@@ -184,6 +211,7 @@ async def main():
 
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
+
     logger.info("Database connected")
 
     pool = app_state.db.get_pool()
@@ -202,7 +230,7 @@ async def main():
         app_state.eventsub_manager = EventSubManager(session)
 
         # -------------------------------------------------
-        # COMMAND REGISTRATION
+        # REGISTER COMMANDS
         # -------------------------------------------------
 
         register_live_commands(bot)
@@ -217,7 +245,7 @@ async def main():
         # -------------------------------------------------
 
         free_task = asyncio.create_task(
-            free_games_loop(session)
+            free_games_loop(session, app_state.db)
         )
 
         monitor = TwitchMonitor(
