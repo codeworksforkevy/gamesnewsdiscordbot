@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 class TwitchMonitor:
 
+    LEADER_LOCK_ID = 987654321  # advisory lock key
+
     def __init__(
         self,
         twitch_api,
@@ -21,8 +23,26 @@ class TwitchMonitor:
         self.logger = logging.getLogger("twitch-monitor")
         self._running = False
 
+        # Metrics
+        self.monitor_cycles_total = 0
+        self.monitor_cycle_failures = 0
+
     # ==================================================
-    # MAIN LOOP (CANCEL SAFE)
+    # LEADER LOCK (Multi-instance Safe)
+    # ==================================================
+
+    async def acquire_leader_lock(self):
+
+        async with self.db_pool.acquire() as conn:
+            result = await conn.fetchval(
+                "SELECT pg_try_advisory_lock($1);",
+                self.LEADER_LOCK_ID
+            )
+
+        return result
+
+    # ==================================================
+    # MAIN LOOP
     # ==================================================
 
     async def start(self):
@@ -30,8 +50,20 @@ class TwitchMonitor:
         if self._running:
             return
 
+        # Leader election
+        is_leader = await self.acquire_leader_lock()
+
+        if not is_leader:
+            self.logger.info(
+                "Monitor not leader — disabled on this instance."
+            )
+            return
+
         self._running = True
-        self.logger.info("TwitchMonitor started.")
+
+        self.logger.info(
+            "TwitchMonitor started (leader)."
+        )
 
         try:
             while self._running:
@@ -56,6 +88,7 @@ class TwitchMonitor:
     async def run_cycle(self):
 
         cycle_start = datetime.now(timezone.utc)
+        self.monitor_cycles_total += 1
 
         try:
             await self.audit_eventsub_subscriptions()
@@ -67,22 +100,29 @@ class TwitchMonitor:
                 datetime.now(timezone.utc) - cycle_start
             ).total_seconds()
 
-            if self.telemetry:
-                self.telemetry.record(
-                    "monitor_cycle_success",
-                    duration=duration
-                )
-
             self.logger.info(
-                "Monitor cycle completed in %.2fs",
-                duration
+                "Monitor cycle completed",
+                extra={
+                    "extra_data": {
+                        "duration_sec": duration,
+                        "cycle": self.monitor_cycles_total
+                    }
+                }
             )
 
         except Exception as e:
-            self.logger.exception("Monitor cycle failed: %s", e)
 
-            if self.telemetry:
-                self.telemetry.record("monitor_cycle_failure")
+            self.monitor_cycle_failures += 1
+
+            self.logger.exception(
+                "Monitor cycle failed",
+                extra={
+                    "extra_data": {
+                        "error": str(e),
+                        "failures": self.monitor_cycle_failures
+                    }
+                }
+            )
 
     # ==================================================
     # EVENTSUB AUDIT
@@ -92,7 +132,6 @@ class TwitchMonitor:
 
         subs = await self.eventsub_manager.list_subscriptions()
 
-        # Sadece stream.online subscription'ları dikkate al
         active_ids = {
             s["condition"]["broadcaster_user_id"]
             for s in subs
@@ -105,13 +144,16 @@ class TwitchMonitor:
             )
 
         db_ids = {r["broadcaster_id"] for r in rows}
-
         missing = db_ids - active_ids
 
         if missing:
             self.logger.warning(
-                "Missing %d EventSub subscriptions.",
-                len(missing)
+                "Missing EventSub subscriptions",
+                extra={
+                    "extra_data": {
+                        "missing_count": len(missing)
+                    }
+                }
             )
 
         for broadcaster_id in missing:
@@ -120,12 +162,11 @@ class TwitchMonitor:
             )
 
     # ==================================================
-    # LIVE STATE RECONCILIATION (BATCH + SAFE)
+    # LIVE STATE RECONCILIATION
     # ==================================================
 
     async def reconcile_live_state(self):
 
-        # Sadece is_live = TRUE olanları çek (daha az iş)
         async with self.db_pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT broadcaster_id
@@ -138,7 +179,6 @@ class TwitchMonitor:
 
         broadcaster_ids = [r["broadcaster_id"] for r in rows]
 
-        # Twitch batch limiti 100
         if len(broadcaster_ids) > 100:
             self.logger.warning(
                 "Streamer count exceeds 100. Truncating batch."
@@ -149,23 +189,25 @@ class TwitchMonitor:
             broadcaster_ids
         )
 
-        # Eğer API fail olduysa reset yapma
         if live_ids is None:
-            self.logger.warning("Live check failed. Skipping reconciliation.")
+            self.logger.warning("Live check failed — skipping reset.")
             return
 
         to_reset = [
-            broadcaster_id
-            for broadcaster_id in broadcaster_ids
-            if broadcaster_id not in live_ids
+            bid for bid in broadcaster_ids
+            if bid not in live_ids
         ]
 
         if not to_reset:
             return
 
         self.logger.info(
-            "Resetting %d drifted live states.",
-            len(to_reset)
+            "Resetting drifted live states",
+            extra={
+                "extra_data": {
+                    "count": len(to_reset)
+                }
+            }
         )
 
         async with self.db_pool.acquire() as conn:
@@ -182,16 +224,12 @@ class TwitchMonitor:
     async def refresh_badges(self):
 
         try:
-            badges = await self.twitch_api.fetch_badges()
-
-            if self.telemetry:
-                self.telemetry.record(
-                    "badge_refresh",
-                    count=len(badges)
-                )
-
+            await self.twitch_api.fetch_badges()
         except Exception as e:
-            self.logger.warning("Badge refresh failed: %s", e)
+            self.logger.warning(
+                "Badge refresh failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
 
     # ==================================================
     # DROPS CHECK
@@ -200,13 +238,20 @@ class TwitchMonitor:
     async def check_drops(self):
 
         try:
-            drops = await self.twitch_api.fetch_drops()
-
-            if self.telemetry:
-                self.telemetry.record(
-                    "drops_check",
-                    count=len(drops)
-                )
-
+            await self.twitch_api.fetch_drops()
         except Exception as e:
-            self.logger.warning("Drops check failed: %s", e)
+            self.logger.warning(
+                "Drops check failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
+
+    # ==================================================
+    # METRICS EXPORT
+    # ==================================================
+
+    def get_metrics(self):
+
+        return {
+            "monitor_cycles_total": self.monitor_cycles_total,
+            "monitor_cycle_failures": self.monitor_cycle_failures
+        }
