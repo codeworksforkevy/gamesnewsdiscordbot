@@ -43,15 +43,16 @@ intents.message_content = False
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==================================================
-# IMPORTS
+# IMPORTS (NEW ARCHITECTURE)
 # ==================================================
 
 from services.db import Database
 from services.state import AppState
 from services.eventsub_server import create_eventsub_app
-from services.free_games_service import update_free_games_cache
 from services.monitor import TwitchMonitor
-from services import twitch_api, eventsub_manager
+from services.twitch_api import TwitchAPI
+from services.eventsub_manager import EventSubManager
+from services.free_games_service import update_free_games_cache
 
 from commands.live_commands import register_live_commands
 from commands.discounts import register as register_discounts
@@ -65,7 +66,8 @@ from commands.utilities.register import register_utilities
 # ==================================================
 
 app_state = AppState()
-
+bot.app_state = app_state
+bot.logger = logger
 
 # ==================================================
 # READY EVENT
@@ -80,7 +82,6 @@ async def on_ready():
         logger.info("Global sync complete (%s commands).", len(synced))
     except Exception:
         logger.exception("Slash sync failed")
-
 
 # ==================================================
 # WEB SERVER
@@ -105,7 +106,6 @@ async def start_web_server(bot, app_state: AppState):
 
     return runner
 
-
 # ==================================================
 # FREE GAME LOOP
 # ==================================================
@@ -119,7 +119,6 @@ async def free_games_loop(session):
 
         await asyncio.sleep(1800)
 
-
 # ==================================================
 # MAIN
 # ==================================================
@@ -128,26 +127,32 @@ async def main():
 
     shutdown_event = asyncio.Event()
 
-    # ------------------------------
+    # -------------------------------------------------
     # DATABASE INIT
-    # ------------------------------
+    # -------------------------------------------------
 
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
-
     logger.info("Database ready.")
 
     pool = app_state.db.get_pool()
 
-    # ------------------------------
-    # HTTP SESSION
-    # ------------------------------
+    # -------------------------------------------------
+    # HTTP SESSION (shared)
+    # -------------------------------------------------
 
     async with ClientSession() as session:
 
-        # ------------------------------
+        # -------------------------------------------------
+        # CORE SERVICES
+        # -------------------------------------------------
+
+        app_state.twitch_api = TwitchAPI(session)
+        app_state.eventsub_manager = EventSubManager(session)
+
+        # -------------------------------------------------
         # REGISTER COMMANDS
-        # ------------------------------
+        # -------------------------------------------------
 
         register_live_commands(bot)
         await register_discounts(bot, session)
@@ -156,50 +161,57 @@ async def main():
         await register_twitch_badges(bot, session)
         await register_utilities(bot)
 
-        # ------------------------------
+        # -------------------------------------------------
         # BACKGROUND TASKS
-        # ------------------------------
+        # -------------------------------------------------
 
-        free_task = asyncio.create_task(free_games_loop(session))
-
-        monitor = TwitchMonitor(
-            twitch_api=twitch_api,
-            eventsub_manager=eventsub_manager,
-            db_pool=pool,
-            interval=300
+        free_task = asyncio.create_task(
+            free_games_loop(session)
         )
 
-        monitor_task = asyncio.create_task(monitor.start())
+        monitor = TwitchMonitor(
+            twitch_api=app_state.twitch_api,
+            eventsub_manager=app_state.eventsub_manager,
+            db_pool=pool,
+            interval=180  # optimized
+        )
 
-        # ------------------------------
+        monitor_task = asyncio.create_task(
+            monitor.start()
+        )
+
+        # -------------------------------------------------
         # WEB SERVER
-        # ------------------------------
+        # -------------------------------------------------
 
         runner = await start_web_server(bot, app_state)
 
-        # ------------------------------
+        # -------------------------------------------------
         # SIGNAL HANDLING
-        # ------------------------------
+        # -------------------------------------------------
 
         loop = asyncio.get_running_loop()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, shutdown_event.set)
 
-        bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
+        bot_task = asyncio.create_task(
+            bot.start(DISCORD_TOKEN)
+        )
 
-        # Wait for shutdown
+        # -------------------------------------------------
+        # WAIT FOR SHUTDOWN
+        # -------------------------------------------------
+
         await shutdown_event.wait()
-
         logger.info("Shutdown signal received.")
 
-        # ------------------------------
+        # -------------------------------------------------
         # CLEAN SHUTDOWN
-        # ------------------------------
+        # -------------------------------------------------
 
-        free_task.cancel()
-        monitor_task.cancel()
-        bot_task.cancel()
+        for task in (free_task, monitor_task, bot_task):
+            task.cancel()
 
         try:
             await runner.cleanup()
@@ -213,6 +225,9 @@ async def main():
 
         logger.info("Shutdown complete.")
 
+# ==================================================
+# ENTRY
+# ==================================================
 
 if __name__ == "__main__":
     asyncio.run(main())
