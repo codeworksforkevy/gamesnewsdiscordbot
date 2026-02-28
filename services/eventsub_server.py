@@ -12,18 +12,19 @@ logger = logging.getLogger("eventsub")
 
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET")
 
+# In-memory idempotency cache (simple, per-instance)
+_recent_messages = set()
+_MAX_CACHE_SIZE = 1000
+
 
 # ==================================================
 # SIGNATURE VERIFICATION
 # ==================================================
 
 def verify_signature(request: web.Request, body: bytes) -> bool:
-    """
-    Verifies Twitch EventSub HMAC signature.
-    """
 
     if not TWITCH_EVENTSUB_SECRET:
-        logger.error("TWITCH_EVENTSUB_SECRET is not set.")
+        logger.error("TWITCH_EVENTSUB_SECRET missing.")
         return False
 
     message_id = request.headers.get("Twitch-Eventsub-Message-Id")
@@ -34,17 +35,17 @@ def verify_signature(request: web.Request, body: bytes) -> bool:
         logger.warning("Missing Twitch signature headers.")
         return False
 
-    # Optional: prevent replay attacks (10 min window)
+    # Replay window (10 min)
     try:
         msg_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
 
         if abs((now - msg_time).total_seconds()) > 600:
-            logger.warning("Twitch message timestamp too old (possible replay).")
+            logger.warning("Message outside allowed time window.")
             return False
 
     except Exception:
-        logger.warning("Invalid Twitch timestamp format.")
+        logger.warning("Invalid timestamp format.")
         return False
 
     message = message_id + timestamp
@@ -63,7 +64,7 @@ def verify_signature(request: web.Request, body: bytes) -> bool:
 # EVENTSUB APP FACTORY
 # ==================================================
 
-async def create_eventsub_app(bot):
+async def create_eventsub_app(bot, app_state):
 
     app = web.Application()
 
@@ -72,16 +73,32 @@ async def create_eventsub_app(bot):
         try:
             body = await request.read()
 
-            # Verify HMAC
+            # 1️⃣ Signature verify
             if not verify_signature(request, body):
-                logger.warning("Signature verification failed.")
                 return web.Response(status=403)
 
+            message_id = request.headers.get("Twitch-Eventsub-Message-Id")
+
+            # 2️⃣ Idempotency protection
+            if message_id in _recent_messages:
+                logger.info("Duplicate EventSub message ignored.")
+                return web.Response(text="duplicate")
+
+            _recent_messages.add(message_id)
+
+            if len(_recent_messages) > _MAX_CACHE_SIZE:
+                _recent_messages.pop()
+
             msg_type = request.headers.get("Twitch-Eventsub-Message-Type")
-            data = json.loads(body.decode())
+
+            try:
+                data = json.loads(body.decode())
+            except json.JSONDecodeError:
+                logger.warning("Invalid JSON payload.")
+                return web.Response(text="invalid-json")
 
             # ----------------------------------------
-            # CHALLENGE (Initial verification)
+            # CHALLENGE
             # ----------------------------------------
             if msg_type == "webhook_callback_verification":
                 challenge = data.get("challenge")
@@ -93,36 +110,55 @@ async def create_eventsub_app(bot):
             # ----------------------------------------
             if msg_type == "notification":
 
+                # DB readiness check
+                if not app_state.db:
+                    logger.error("DB not ready.")
+                    return web.Response(text="db-not-ready")
+
                 event = data.get("event", {})
                 subscription = data.get("subscription", {})
                 sub_type = subscription.get("type")
 
                 if sub_type == "stream.online":
-                    logger.info("Received stream.online for %s",
-                                event.get("broadcaster_user_name"))
 
-                    await notify_live(bot, None, event)
+                    logger.info(
+                        "stream.online: %s",
+                        event.get("broadcaster_user_name")
+                    )
+
+                    await notify_live(bot, app_state, event)
 
                 elif sub_type == "stream.offline":
-                    logger.info("Received stream.offline for %s",
-                                event.get("broadcaster_user_name"))
 
-                    await mark_offline(event)
+                    logger.info(
+                        "stream.offline: %s",
+                        event.get("broadcaster_user_name")
+                    )
+
+                    await mark_offline(app_state, event)
 
                 return web.Response(text="ok")
 
             # ----------------------------------------
-            # REVOCATION / UNKNOWN
+            # REVOCATION
             # ----------------------------------------
             if msg_type == "revocation":
-                logger.warning("EventSub subscription revoked.")
+
+                sub = data.get("subscription", {})
+                logger.warning(
+                    "Subscription revoked: %s (%s)",
+                    sub.get("type"),
+                    sub.get("condition", {}).get("broadcaster_user_id")
+                )
+
                 return web.Response(text="revoked")
 
             return web.Response(text="ignored")
 
         except Exception as e:
-            logger.exception("EventSub error: %s", e)
-            return web.Response(status=500)
+            # 🔥 Never let Twitch retry storm
+            logger.exception("Unhandled EventSub error: %s", e)
+            return web.Response(text="error-handled")
 
     app.router.add_post("/twitch/eventsub", webhook)
 
