@@ -74,13 +74,10 @@ from services.eventsub_server import create_eventsub_app
 from services.monitor import TwitchMonitor
 from services.twitch_api import TwitchAPI
 from services.eventsub_manager import EventSubManager
-
-from services.free_games_service import update_free_games_cache
-from services.epic import fetch_epic_free
-from services.gog import fetch_gog_free
-from services.humble import fetch_humble_free
-from services.steam import fetch_steam_free
-from services.luna import fetch_luna_free
+from services.free_games_service import (
+    update_free_games_cache,
+    init_cache
+)
 
 from commands.live_commands import register_live_commands
 from commands.discounts import register as register_discounts
@@ -124,7 +121,7 @@ async def on_ready():
 
 
 # ==================================================
-# WEB SERVER (Health + Metrics)
+# WEB SERVER
 # ==================================================
 
 async def start_web_server(bot, app_state: AppState, monitor: TwitchMonitor):
@@ -139,7 +136,6 @@ async def start_web_server(bot, app_state: AppState, monitor: TwitchMonitor):
 monitor_cycles_total {m['monitor_cycles_total']}
 monitor_cycle_failures {m['monitor_cycle_failures']}
 """
-
         return web.Response(
             text=payload.strip(),
             content_type="text/plain"
@@ -166,27 +162,14 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
 
 
 # ==================================================
-# FREE GAME LOOP (NEW ARCHITECTURE)
+# FREE GAME SCHEDULER
 # ==================================================
 
-async def free_games_loop(session, db):
+async def free_games_loop(session):
 
     while True:
         try:
-            epic = await fetch_epic_free(session)
-            gog = await fetch_gog_free(session)
-            humble = await fetch_humble_free(session)
-            steam = await fetch_steam_free(session)
-            luna = await fetch_luna_free(session)
-
-            await update_free_games_cache(
-                db,
-                epic,
-                gog,
-                humble,
-                steam,
-                luna
-            )
+            await update_free_games_cache(session)
 
         except Exception as e:
             logger.error(
@@ -211,10 +194,15 @@ async def main():
 
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
-
     logger.info("Database connected")
 
     pool = app_state.db.get_pool()
+
+    # -------------------------------------------------
+    # CACHE INIT (Redis optional)
+    # -------------------------------------------------
+
+    await init_cache()
 
     # -------------------------------------------------
     # HTTP SESSION
@@ -222,17 +210,11 @@ async def main():
 
     async with ClientSession() as session:
 
-        # -------------------------------------------------
-        # CORE SERVICES
-        # -------------------------------------------------
-
+        # Core services
         app_state.twitch_api = TwitchAPI(session)
         app_state.eventsub_manager = EventSubManager(session)
 
-        # -------------------------------------------------
-        # REGISTER COMMANDS
-        # -------------------------------------------------
-
+        # Register commands
         register_live_commands(bot)
         await register_discounts(bot, session)
         await register_free_games(bot, session)
@@ -240,12 +222,9 @@ async def main():
         await register_twitch_badges(bot, session)
         await register_utilities(bot)
 
-        # -------------------------------------------------
-        # BACKGROUND TASKS
-        # -------------------------------------------------
-
+        # Background tasks
         free_task = asyncio.create_task(
-            free_games_loop(session, app_state.db)
+            free_games_loop(session)
         )
 
         monitor = TwitchMonitor(
@@ -259,18 +238,15 @@ async def main():
             monitor.start()
         )
 
-        # -------------------------------------------------
-        # WEB SERVER
-        # -------------------------------------------------
+        # Web server
+        runner = await start_web_server(
+            bot,
+            app_state,
+            monitor
+        )
 
-        runner = await start_web_server(bot, app_state, monitor)
-
-        # -------------------------------------------------
-        # SIGNAL HANDLING
-        # -------------------------------------------------
-
+        # Signal handling
         loop = asyncio.get_running_loop()
-
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, shutdown_event.set)
 
@@ -278,18 +254,11 @@ async def main():
             bot.start(DISCORD_TOKEN)
         )
 
-        # -------------------------------------------------
-        # WAIT
-        # -------------------------------------------------
-
+        # Wait
         await shutdown_event.wait()
-
         logger.info("Shutdown signal received")
 
-        # -------------------------------------------------
-        # CLEAN SHUTDOWN
-        # -------------------------------------------------
-
+        # Cleanup
         for task in (free_task, monitor_task, bot_task):
             task.cancel()
 
