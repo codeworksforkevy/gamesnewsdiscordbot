@@ -22,7 +22,7 @@ class TwitchMonitor:
         self._running = False
 
     # ==================================================
-    # MAIN LOOP
+    # MAIN LOOP (CANCEL SAFE)
     # ==================================================
 
     async def start(self):
@@ -33,9 +33,17 @@ class TwitchMonitor:
         self._running = True
         self.logger.info("TwitchMonitor started.")
 
-        while self._running:
-            await self.run_cycle()
-            await asyncio.sleep(self.interval)
+        try:
+            while self._running:
+                await self.run_cycle()
+                await asyncio.sleep(self.interval)
+
+        except asyncio.CancelledError:
+            self.logger.info("TwitchMonitor cancelled.")
+            raise
+
+        finally:
+            self._running = False
 
     async def stop(self):
         self._running = False
@@ -76,11 +84,15 @@ class TwitchMonitor:
 
         subs = await self.eventsub_manager.list_subscriptions()
 
-        # Example: detect orphan subs
-        active_ids = {s["condition"]["broadcaster_user_id"] for s in subs}
+        active_ids = {
+            s["condition"]["broadcaster_user_id"]
+            for s in subs
+        }
 
         async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT DISTINCT broadcaster_id FROM streamers;")
+            rows = await conn.fetch(
+                "SELECT DISTINCT broadcaster_id FROM streamers;"
+            )
 
         db_ids = {r["broadcaster_id"] for r in rows}
 
@@ -91,7 +103,9 @@ class TwitchMonitor:
                 "Missing EventSub subscription for %s. Re-subscribing.",
                 broadcaster_id
             )
-            await self.eventsub_manager.ensure_stream_subscriptions(broadcaster_id)
+            await self.eventsub_manager.ensure_stream_subscriptions(
+                broadcaster_id
+            )
 
     # ==================================================
     # LIVE STATE RECONCILIATION
@@ -101,28 +115,34 @@ class TwitchMonitor:
 
         async with self.db_pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT guild_id, broadcaster_id, is_live
+                SELECT broadcaster_id, is_live
                 FROM streamers;
             """)
 
+        # ⚠ Sequential – later optimize with batch API
         for row in rows:
 
             broadcaster_id = row["broadcaster_id"]
             db_live = row["is_live"]
 
-            stream = await self.twitch_api.check_stream_live(broadcaster_id)
+            stream = await self.twitch_api.check_stream_live(
+                broadcaster_id
+            )
             actual_live = stream is not None
 
             if db_live and not actual_live:
+
                 self.logger.info(
                     "Live drift detected for %s. Resetting state.",
                     broadcaster_id
                 )
-                await conn.execute("""
-                    UPDATE streamers
-                    SET is_live = FALSE
-                    WHERE broadcaster_id = $1;
-                """, broadcaster_id)
+
+                async with self.db_pool.acquire() as conn:
+                    await conn.execute("""
+                        UPDATE streamers
+                        SET is_live = FALSE
+                        WHERE broadcaster_id = $1;
+                    """, broadcaster_id)
 
     # ==================================================
     # BADGE REFRESH
@@ -134,7 +154,10 @@ class TwitchMonitor:
             badges = await self.twitch_api.fetch_badges()
 
             if self.telemetry:
-                self.telemetry.record("badge_refresh", count=len(badges))
+                self.telemetry.record(
+                    "badge_refresh",
+                    count=len(badges)
+                )
 
             self.logger.info("Badge refresh completed.")
 
@@ -151,7 +174,10 @@ class TwitchMonitor:
             drops = await self.twitch_api.fetch_drops()
 
             if self.telemetry:
-                self.telemetry.record("drops_check", count=len(drops))
+                self.telemetry.record(
+                    "drops_check",
+                    count=len(drops)
+                )
 
             self.logger.info("Drops check completed.")
 
