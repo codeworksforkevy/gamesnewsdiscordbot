@@ -11,7 +11,7 @@ class TwitchMonitor:
         eventsub_manager,
         db_pool,
         telemetry=None,
-        interval=180  # 3 min default (EventSub real-time olduğu için agresif gerek yok)
+        interval=180
     ):
         self.twitch_api = twitch_api
         self.eventsub_manager = eventsub_manager
@@ -79,27 +79,24 @@ class TwitchMonitor:
             )
 
         except Exception as e:
-            self.logger.exception(
-                "Monitor cycle failed: %s",
-                e
-            )
+            self.logger.exception("Monitor cycle failed: %s", e)
 
             if self.telemetry:
-                self.telemetry.record(
-                    "monitor_cycle_failure"
-                )
+                self.telemetry.record("monitor_cycle_failure")
 
     # ==================================================
-    # EVENTSUB AUDIT (Self-Healing)
+    # EVENTSUB AUDIT
     # ==================================================
 
     async def audit_eventsub_subscriptions(self):
 
         subs = await self.eventsub_manager.list_subscriptions()
 
+        # Sadece stream.online subscription'ları dikkate al
         active_ids = {
             s["condition"]["broadcaster_user_id"]
             for s in subs
+            if s.get("type") == "stream.online"
         }
 
         async with self.db_pool.acquire() as conn:
@@ -123,34 +120,44 @@ class TwitchMonitor:
             )
 
     # ==================================================
-    # LIVE STATE RECONCILIATION (BATCH OPTIMIZED)
+    # LIVE STATE RECONCILIATION (BATCH + SAFE)
     # ==================================================
 
     async def reconcile_live_state(self):
 
+        # Sadece is_live = TRUE olanları çek (daha az iş)
         async with self.db_pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT broadcaster_id, is_live
-                FROM streamers;
+                SELECT broadcaster_id
+                FROM streamers
+                WHERE is_live = TRUE;
             """)
 
         if not rows:
             return
 
-        broadcaster_ids = [
-            r["broadcaster_id"] for r in rows
-        ]
+        broadcaster_ids = [r["broadcaster_id"] for r in rows]
 
-        # 🔥 SINGLE batch Twitch API call (max 100 supported)
+        # Twitch batch limiti 100
+        if len(broadcaster_ids) > 100:
+            self.logger.warning(
+                "Streamer count exceeds 100. Truncating batch."
+            )
+            broadcaster_ids = broadcaster_ids[:100]
+
         live_ids = await self.twitch_api.check_streams_live(
             broadcaster_ids
         )
 
-        # Determine which need reset
+        # Eğer API fail olduysa reset yapma
+        if live_ids is None:
+            self.logger.warning("Live check failed. Skipping reconciliation.")
+            return
+
         to_reset = [
-            r["broadcaster_id"]
-            for r in rows
-            if r["is_live"] and r["broadcaster_id"] not in live_ids
+            broadcaster_id
+            for broadcaster_id in broadcaster_ids
+            if broadcaster_id not in live_ids
         ]
 
         if not to_reset:
@@ -161,7 +168,6 @@ class TwitchMonitor:
             len(to_reset)
         )
 
-        # 🔥 Single bulk update
         async with self.db_pool.acquire() as conn:
             await conn.execute("""
                 UPDATE streamers
@@ -185,10 +191,7 @@ class TwitchMonitor:
                 )
 
         except Exception as e:
-            self.logger.warning(
-                "Badge refresh failed: %s",
-                e
-            )
+            self.logger.warning("Badge refresh failed: %s", e)
 
     # ==================================================
     # DROPS CHECK
@@ -206,7 +209,4 @@ class TwitchMonitor:
                 )
 
         except Exception as e:
-            self.logger.warning(
-                "Drops check failed: %s",
-                e
-            )
+            self.logger.warning("Drops check failed: %s", e)
