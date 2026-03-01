@@ -85,6 +85,7 @@ from commands.free_games import register as register_free_games
 from commands.membership import register as register_membership
 from commands.twitch_badges import register as register_twitch_badges
 from commands.utilities.register import register_utilities
+from commands.help import register as register_help   # ✅ NEW
 
 
 # ==================================================
@@ -199,7 +200,7 @@ async def main():
     pool = app_state.db.get_pool()
 
     # -------------------------------------------------
-    # CACHE INIT (Redis optional)
+    # CACHE INIT
     # -------------------------------------------------
 
     await init_cache()
@@ -214,15 +215,22 @@ async def main():
         app_state.twitch_api = TwitchAPI(session)
         app_state.eventsub_manager = EventSubManager(session)
 
-        # Register commands
+        # -------------------------------------------------
+        # REGISTER COMMANDS
+        # -------------------------------------------------
+
         register_live_commands(bot)
         await register_discounts(bot, session)
         await register_free_games(bot, session)
         await register_membership(bot, session)
         await register_twitch_badges(bot, session)
         await register_utilities(bot)
+        await register_help(bot)   # ✅ NEW
 
-        # Background tasks
+        # -------------------------------------------------
+        # BACKGROUND TASKS
+        # -------------------------------------------------
+
         free_task = asyncio.create_task(
             free_games_loop(session)
         )
@@ -238,14 +246,20 @@ async def main():
             monitor.start()
         )
 
-        # Web server
+        # -------------------------------------------------
+        # WEB SERVER
+        # -------------------------------------------------
+
         runner = await start_web_server(
             bot,
             app_state,
             monitor
         )
 
-        # Signal handling
+        # -------------------------------------------------
+        # SIGNAL HANDLING
+        # -------------------------------------------------
+
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, shutdown_event.set)
@@ -254,11 +268,17 @@ async def main():
             bot.start(DISCORD_TOKEN)
         )
 
-        # Wait
+        # -------------------------------------------------
+        # WAIT
+        # -------------------------------------------------
+
         await shutdown_event.wait()
         logger.info("Shutdown signal received")
 
-        # Cleanup
+        # -------------------------------------------------
+        # CLEAN SHUTDOWN
+        # -------------------------------------------------
+
         for task in (free_task, monitor_task, bot_task):
             task.cancel()
 
