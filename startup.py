@@ -1,10 +1,6 @@
 import discord
 import logging
 import asyncio
-import time
-
-from db.guild_settings import get_guild_settings
-from core.state_manager import state_manager
 
 logger = logging.getLogger("startup")
 
@@ -43,8 +39,9 @@ async def startup_sync(bot):
 
     logger.info("🚀 Startup sync started")
 
-    db = bot.app_state.db
-    eventsub = bot.app_state.eventsub_manager
+    app_state = bot.app_state
+    db = app_state.require_db()
+    eventsub = app_state.eventsub_manager
 
     # =========================
     # GUILD CACHE WARMUP
@@ -66,9 +63,16 @@ async def startup_sync(bot):
             logger.info(f"Processing guild: {guild.name} ({guild.id})")
 
             # =========================
-            # LOAD CONFIG FROM DB
+            # LOAD SETTINGS FROM DB
             # =========================
-            settings = await get_guild_settings(db, guild.id)
+            settings = await db.fetchrow(
+                """
+                SELECT announce_channel_id
+                FROM guild_settings
+                WHERE guild_id = $1
+                """,
+                guild.id
+            )
 
             if not settings:
                 logger.warning(f"No settings found for guild {guild.id}")
@@ -86,14 +90,18 @@ async def startup_sync(bot):
             live_role = await ensure_live_role(guild)
 
             if live_role:
-                bot.app_state.live_roles[guild.id] = live_role.id
+                if not hasattr(app_state, "live_roles"):
+                    app_state.live_roles = {}
+
+                app_state.live_roles[guild.id] = live_role.id
 
             # =========================
-            # SAVE STATE (STATE MANAGER)
+            # SAVE STATE
             # =========================
-            await state_manager.set_guild_state(
-                guild.id,
+            await app_state.emit(
+                "guild_ready",
                 {
+                    "guild_id": guild.id,
                     "channel_id": channel_id,
                     "live_role_id": getattr(live_role, "id", None),
                 }
@@ -128,7 +136,7 @@ async def startup_sync(bot):
                 try:
                     await eventsub.subscribe_stream_online(
                         broadcaster_id,
-                        bot.app_state.webhook_url
+                        app_state.get_config("webhook_url")
                     )
 
                     logger.info(f"Subscribed: {twitch_login}")
@@ -139,10 +147,27 @@ async def startup_sync(bot):
                         extra={"error": str(e)}
                     )
 
+                # =========================
+                # EVENT EMIT
+                # =========================
+                await app_state.emit(
+                    "streamer_subscribed",
+                    {
+                        "guild_id": guild.id,
+                        "twitch_login": twitch_login,
+                        "broadcaster_id": broadcaster_id,
+                    }
+                )
+
         except Exception as e:
             logger.error(
                 f"Startup error in guild {guild.id}",
                 extra={"error": str(e)}
             )
+
+    # =========================
+    # READY EVENT
+    # =========================
+    app_state.mark_ready()
 
     logger.info("✅ Startup sync completed")
