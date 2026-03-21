@@ -1,21 +1,42 @@
-import aiohttp
+import logging
+from typing import List, Dict, Any
+
+logger = logging.getLogger("steam")
 
 
-async def fetch_steam_free(session):
-    url = "https://store.steampowered.com/api/featuredcategories"
+STEAM_API_URL = "https://store.steampowered.com/api/featuredcategories"
 
-    async with session.get(url, timeout=10) as resp:
-        data = await resp.json()
 
-    games = []
+async def fetch_steam_discounts(session) -> List[Dict[str, Any]]:
+    """
+    Fetch discounted games from Steam API
+    """
 
-    # Basit extraction (örnek)
-    for item in data.get("specials", {}).get("items", []):
-        if item.get("final_price") == 0:
-            games.append({
-                "title": item.get("name"),
-                "url": item.get("store_url"),
-                "platform": "Steam"
-            })
+    try:
+        async with session.get(STEAM_API_URL, timeout=10) as resp:
 
-    return games
+            if resp.status != 200:
+                logger.error(f"Steam API error: {resp.status}")
+                return []
+
+            data = await resp.json()
+
+            specials = data.get("specials", {})
+            items = specials.get("items", [])
+
+            results = []
+
+            for item in items:
+                results.append({
+                    "name": item.get("name"),
+                    "discount": item.get("discount_percent"),
+                    "final_price": item.get("final_price"),
+                    "original_price": item.get("original_price"),
+                    "url": f"https://store.steampowered.com/app/{item.get('id')}"
+                })
+
+            return results
+
+    except Exception as e:
+        logger.error(f"Steam fetch failed: {e}")
+        return []
