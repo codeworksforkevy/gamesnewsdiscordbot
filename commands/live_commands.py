@@ -3,11 +3,14 @@ from discord import app_commands
 from services.eventsub_manager import subscribe_stream_online
 import asyncpg
 import os
+import aiohttp
+
 
 async def get_conn():
     return await asyncpg.connect(os.getenv("DATABASE_URL"))
 
-def setup(bot):
+
+def register_live_commands(bot):
 
     @bot.tree.command(name="add_streamer")
     async def add_streamer(
@@ -17,9 +20,6 @@ def setup(bot):
         await interaction.response.defer(ephemeral=True)
 
         conn = await get_conn()
-
-        # Twitch → user_id fetch
-        import aiohttp
 
         headers = {
             "Client-ID": os.getenv("TWITCH_CLIENT_ID"),
@@ -33,14 +33,12 @@ def setup(bot):
             ) as resp:
                 data = await resp.json()
 
-        if not data["data"]:
+        if not data.get("data"):
             return await interaction.followup.send("❌ Twitch user not found")
 
         user = data["data"][0]
-
         twitch_user_id = user["id"]
 
-        # DB insert
         await conn.execute(
             """
             INSERT INTO streamers (twitch_user_id, twitch_login, guild_id)
@@ -54,7 +52,6 @@ def setup(bot):
 
         await conn.close()
 
-        # EventSub subscribe
         await subscribe_stream_online(
             twitch_user_id,
             os.getenv("WEBHOOK_URL")
