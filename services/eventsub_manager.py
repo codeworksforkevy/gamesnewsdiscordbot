@@ -9,8 +9,10 @@ TWITCH_EVENTSUB_URL = "https://api.twitch.tv/helix/eventsub/subscriptions"
 
 class EventSubManager:
 
-    def __init__(self, session: aiohttp.ClientSession):
+    def __init__(self, twitch_api, session: aiohttp.ClientSession, db):
+        self.twitch_api = twitch_api
         self.session = session
+        self.db = db
 
     async def subscribe_stream_online(self, broadcaster_user_id: str, callback_url: str):
 
@@ -46,9 +48,24 @@ class EventSubManager:
             else:
                 logger.info(f"Subscribed to {broadcaster_user_id}")
 
+                # optional DB kayıt (ileride unsubscribe için)
+                try:
+                    pool = self.db.get_pool()
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            INSERT INTO twitch_eventsub (broadcaster_id)
+                            VALUES ($1)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            broadcaster_user_id
+                        )
+                except Exception as e:
+                    logger.warning(f"DB write failed: {e}")
 
-# 🔥 BACKWARD COMPAT (senin eski import için)
+
+# 🔥 BACKWARD COMPAT
 async def subscribe_stream_online(broadcaster_user_id: str, callback_url: str):
     async with aiohttp.ClientSession() as session:
-        manager = EventSubManager(session)
+        manager = EventSubManager(None, session, None)
         await manager.subscribe_stream_online(broadcaster_user_id, callback_url)
