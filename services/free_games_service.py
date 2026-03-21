@@ -13,40 +13,111 @@ logger = logging.getLogger("free-games")
 
 CACHE_KEY = "free_games_cache"
 
+# fallback in-memory cache (Railway restart-safe değil ama fallback olarak)
+_memory_cache = []
+
 
 # ==================================================
 # INIT CACHE
 # ==================================================
 
 async def init_cache(redis=None):
+    """
+    Initialize cache safely
+    """
+
     if not redis:
         return
 
-    if not await redis.exists(CACHE_KEY):
-        await redis.set(CACHE_KEY, json.dumps([]))
+    try:
+        if not await redis.exists(CACHE_KEY):
+            await redis.set(CACHE_KEY, json.dumps([]))
+
+    except Exception as e:
+        logger.warning(
+            "Cache init failed",
+            extra={"extra_data": {"error": str(e)}}
+        )
 
 
 # ==================================================
-# UPDATE CACHE + DIFF
+# GET CACHE (FIXED MISSING FUNCTION)
+# ==================================================
+
+async def get_cached_free_games(redis=None):
+    """
+    Returns cached games safely
+    """
+
+    global _memory_cache
+
+    if not redis:
+        return _memory_cache
+
+    try:
+        cached = await redis.get(CACHE_KEY)
+
+        if not cached:
+            return _memory_cache
+
+        # Redis returns bytes sometimes
+        if isinstance(cached, bytes):
+            cached = cached.decode("utf-8")
+
+        data = json.loads(cached)
+
+        if not isinstance(data, list):
+            return _memory_cache
+
+        _memory_cache = data
+        return data
+
+    except Exception as e:
+        logger.warning(
+            "Failed to read cache",
+            extra={"extra_data": {"error": str(e)}}
+        )
+
+        return _memory_cache
+
+
+# ==================================================
+# UPDATE CACHE + DIFF + NOTIFY
 # ==================================================
 
 async def update_free_games_cache(session, bot=None, redis=None):
 
+    global _memory_cache
+
     try:
-        epic = await fetch_epic_free(session)
-        gog = await fetch_gog_free(session)
+        # -------------------------
+        # FETCH SOURCES (ISOLATED)
+        # -------------------------
+        epic = []
+        gog = []
+
+        try:
+            epic = await fetch_epic_free(session)
+        except Exception as e:
+            logger.warning(
+                "Epic fetch failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
+
+        try:
+            gog = await fetch_gog_free(session)
+        except Exception as e:
+            logger.warning(
+                "GOG fetch failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
 
         new_games = epic + gog
 
         # -------------------------
         # LOAD OLD CACHE
         # -------------------------
-        old_games = []
-
-        if redis:
-            cached = await redis.get(CACHE_KEY)
-            if cached:
-                old_games = json.loads(cached)
+        old_games = await get_cached_free_games(redis)
 
         # -------------------------
         # DIFF
@@ -66,13 +137,28 @@ async def update_free_games_cache(session, bot=None, redis=None):
         # NOTIFY
         # -------------------------
         if bot:
-            await notify_discord(bot, new_only)
+            try:
+                await notify_discord(bot, new_only)
+            except Exception as e:
+                logger.warning(
+                    "Notify failed",
+                    extra={"extra_data": {"error": str(e)}}
+                )
 
         # -------------------------
         # UPDATE CACHE
         # -------------------------
-        if redis:
-            await redis.set(CACHE_KEY, json.dumps(new_games))
+        try:
+            _memory_cache = new_games
+
+            if redis:
+                await redis.set(CACHE_KEY, json.dumps(new_games))
+
+        except Exception as e:
+            logger.warning(
+                "Cache update failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
 
     except Exception as e:
         logger.error(
