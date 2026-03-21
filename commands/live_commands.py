@@ -1,164 +1,63 @@
 import discord
 from discord import app_commands
-import logging
+from services.eventsub_manager import subscribe_stream_online
+import asyncpg
+import os
 
-from services.streamer_registry import add_streamer, remove_streamer
-from services.guild_config import upsert_guild_config
+async def get_conn():
+    return await asyncpg.connect(os.getenv("DATABASE_URL"))
 
-logger = logging.getLogger("live-commands")
+def setup(bot):
 
-# ==================================================
-# PERMISSIONS
-# ==================================================
-
-def has_permission(interaction: discord.Interaction) -> bool:
-    if not interaction.guild:
-        return False
-
-    perms = interaction.user.guild_permissions
-    return perms.administrator or perms.manage_guild
-
-
-# ==================================================
-# COMMAND REGISTRATION
-# ==================================================
-
-def register_live_commands(bot):
-
-    group = app_commands.Group(
-        name="live",
-        description="Manage Twitch live notifications"
-    )
-
-    # ==================================================
-    # ADD STREAMER
-    # ==================================================
-
-    @group.command(name="add")
-    async def add(
+    @bot.tree.command(name="add_streamer")
+    async def add_streamer(
         interaction: discord.Interaction,
-        login: str,
-        channel: discord.TextChannel,
-        role: discord.Role = None
+        twitch_login: str
     ):
-        if not has_permission(interaction):
-            await interaction.response.send_message(
-                "❌ Permission required (Manage Server / Administrator).",
-                ephemeral=True
-            )
-            return
-
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            twitch_api = bot.app_state.twitch_api
+        conn = await get_conn()
 
-            # 🔍 Resolve Twitch user
-            user = await twitch_api.resolve_user(login)
+        # Twitch → user_id fetch
+        import aiohttp
 
-            if not user:
-                await interaction.followup.send("❌ Twitch channel not found.")
-                return
+        headers = {
+            "Client-ID": os.getenv("TWITCH_CLIENT_ID"),
+            "Authorization": f"Bearer {os.getenv('TWITCH_APP_TOKEN')}"
+        }
 
-            guild_id = interaction.guild_id
-            broadcaster_id = user["id"]
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://api.twitch.tv/helix/users?login={twitch_login}",
+                headers=headers
+            ) as resp:
+                data = await resp.json()
 
-            # ==================================================
-            # DB → STREAMER
-            # ==================================================
+        if not data["data"]:
+            return await interaction.followup.send("❌ Twitch user not found")
 
-            await add_streamer(
-                bot.app_state.db,
-                guild_id,
-                broadcaster_id,
-                channel.id
-            )
+        user = data["data"][0]
 
-            # ==================================================
-            # GUILD CONFIG
-            # ==================================================
+        twitch_user_id = user["id"]
 
-            await upsert_guild_config(
-                bot.app_state.db,
-                guild_id,
-                channel.id,
-                role.id if role else None
-            )
+        # DB insert
+        await conn.execute(
+            """
+            INSERT INTO streamers (twitch_user_id, twitch_login, guild_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (twitch_user_id) DO NOTHING
+            """,
+            twitch_user_id,
+            twitch_login,
+            interaction.guild.id
+        )
 
-            # ==================================================
-            # EVENTSUB SUBSCRIPTION
-            # ==================================================
+        await conn.close()
 
-            try:
-                await bot.app_state.eventsub_manager.subscribe_all(broadcaster_id)
+        # EventSub subscribe
+        await subscribe_stream_online(
+            twitch_user_id,
+            os.getenv("WEBHOOK_URL")
+        )
 
-            except Exception as e:
-                logger.error("EventSub subscription failed: %s", e)
-                await interaction.followup.send(
-                    "⚠️ Streamer added, but EventSub subscription failed. Check logs."
-                )
-                return
-
-            # ==================================================
-            # SUCCESS RESPONSE
-            # ==================================================
-
-            await interaction.followup.send(
-                f"✅ Now tracking **{user['display_name']}**\n"
-                f"📺 Channel: {channel.mention}",
-            )
-
-        except Exception as e:
-            logger.exception("Add command failed: %s", e)
-            await interaction.followup.send(
-                "❌ An unexpected error occurred."
-            )
-
-    # ==================================================
-    # REMOVE STREAMER
-    # ==================================================
-
-    @group.command(name="remove")
-    async def remove(
-        interaction: discord.Interaction,
-        login: str
-    ):
-        if not has_permission(interaction):
-            await interaction.response.send_message(
-                "❌ Permission required (Manage Server / Administrator).",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        try:
-            twitch_api = bot.app_state.twitch_api
-
-            user = await twitch_api.resolve_user(login)
-
-            if not user:
-                await interaction.followup.send("❌ Twitch channel not found.")
-                return
-
-            await remove_streamer(
-                bot.app_state.db,
-                interaction.guild_id,
-                user["id"]
-            )
-
-            await interaction.followup.send(
-                f"🛑 Stopped tracking **{user['display_name']}**"
-            )
-
-        except Exception as e:
-            logger.exception("Remove command failed: %s", e)
-            await interaction.followup.send(
-                "❌ An unexpected error occurred."
-            )
-
-    # ==================================================
-    # REGISTER COMMAND GROUP
-    # ==================================================
-
-    bot.tree.add_command(group)
+        await interaction.followup.send(f"✅ Streamer added: {twitch_login}")
