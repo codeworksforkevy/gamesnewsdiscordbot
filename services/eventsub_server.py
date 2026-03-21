@@ -5,6 +5,7 @@ import os
 import time
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from services.twitch_event_router import route_event
 
@@ -12,11 +13,16 @@ logger = logging.getLogger("eventsub-server")
 
 app = FastAPI()
 
-TWITCH_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET")
-bot_instance = None  # main.py set eder
+# ✅ FIX: correct env name
+TWITCH_SECRET = os.getenv("TWITCH_WEBHOOK_SECRET")
 
-# Replay attack koruması (10 dakika)
+bot_instance = None  # set in main.py
+
+# Replay protection (seconds)
 MAX_REQUEST_AGE = 600
+
+# Simple in-memory deduplication (production: Redis önerilir)
+seen_message_ids = set()
 
 
 # ==================================================
@@ -26,7 +32,7 @@ MAX_REQUEST_AGE = 600
 def verify_signature(message_id, timestamp, body, signature):
 
     if not TWITCH_SECRET:
-        raise RuntimeError("TWITCH_EVENTSUB_SECRET missing")
+        raise RuntimeError("TWITCH_WEBHOOK_SECRET missing")
 
     msg = message_id + timestamp + body
 
@@ -40,24 +46,27 @@ def verify_signature(message_id, timestamp, body, signature):
 
 
 # ==================================================
-# TIMESTAMP VALIDATION (ANTI-REPLAY)
+# TIMESTAMP VALIDATION (IMPROVED)
 # ==================================================
 
 def is_valid_timestamp(timestamp: str):
 
     try:
-        ts = int(time.mktime(time.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")))
+        ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
     except Exception:
         return False
 
-    return abs(time.time() - ts) < MAX_REQUEST_AGE
+    delta = abs((now - ts).total_seconds())
+
+    return delta < MAX_REQUEST_AGE
 
 
 # ==================================================
 # EVENTSUB ENDPOINT
 # ==================================================
 
-@app.post("/twitch/eventsub")
+@app.post("/eventsub")
 async def twitch_eventsub(
     request: Request,
     twitch_eventsub_message_type: str = Header(...),
@@ -66,14 +75,24 @@ async def twitch_eventsub(
     twitch_eventsub_message_signature: str = Header(...),
 ):
 
-    body = await request.body()
-    body_str = body.decode()
+    # ⚠️ Duplicate protection
+    if twitch_eventsub_message_id in seen_message_ids:
+        return {"status": "duplicate_ignored"}
 
-    # 🔐 Timestamp check
+    seen_message_ids.add(twitch_eventsub_message_id)
+
+    # Keep memory bounded
+    if len(seen_message_ids) > 10000:
+        seen_message_ids.clear()
+
+    body_bytes = await request.body()
+    body_str = body_bytes.decode()
+
+    # 🔐 Timestamp validation
     if not is_valid_timestamp(twitch_eventsub_message_timestamp):
         raise HTTPException(status_code=403, detail="Stale request")
 
-    # 🔐 Signature check
+    # 🔐 Signature validation
     if not verify_signature(
         twitch_eventsub_message_id,
         twitch_eventsub_message_timestamp,
@@ -82,13 +101,20 @@ async def twitch_eventsub(
     ):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
+    # Parse JSON (safe)
     data = await request.json()
 
-    # 🔁 Webhook verification
+    # ==================================================
+    # CHALLENGE (Webhook verification)
+    # ==================================================
+
     if twitch_eventsub_message_type == "webhook_callback_verification":
         return data["challenge"]
 
-    # 🔔 Notification
+    # ==================================================
+    # NOTIFICATION
+    # ==================================================
+
     if twitch_eventsub_message_type == "notification":
 
         if not bot_instance:
@@ -98,7 +124,7 @@ async def twitch_eventsub(
         event = data.get("event", {})
         sub_type = data.get("subscription", {}).get("type")
 
-        # ⚡ Fire and forget (Twitch retry önlemek için)
+        # Fire-and-forget
         asyncio.create_task(
             route_event(bot_instance, sub_type, event)
         )
