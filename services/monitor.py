@@ -12,12 +12,16 @@ class TwitchMonitor:
         twitch_api,
         eventsub_manager,
         db_pool,
+        redis,
+        notifier=None,
         telemetry=None,
         interval=180
     ):
         self.twitch_api = twitch_api
         self.eventsub_manager = eventsub_manager
         self.db_pool = db_pool
+        self.redis = redis
+        self.notifier = notifier
         self.telemetry = telemetry
         self.interval = interval
 
@@ -25,7 +29,6 @@ class TwitchMonitor:
 
         self._running = False
 
-        # Metrics
         self.monitor_cycles_total = 0
         self.monitor_cycle_failures = 0
 
@@ -34,21 +37,18 @@ class TwitchMonitor:
     # ==================================================
 
     async def acquire_leader_lock(self):
-
         try:
             async with self.db_pool.acquire() as conn:
-                result = await conn.fetchval(
+                return await conn.fetchval(
                     "SELECT pg_try_advisory_lock($1);",
                     self.LEADER_LOCK_ID
                 )
-            return result
-
         except Exception:
             self.logger.exception("Leader lock acquisition failed")
             return False
 
     # ==================================================
-    # START LOOP
+    # START
     # ==================================================
 
     async def start(self):
@@ -63,55 +63,43 @@ class TwitchMonitor:
             return
 
         self._running = True
-
         self.logger.info("TwitchMonitor started (leader).")
 
-        try:
-            while self._running:
+        while self._running:
+            try:
                 await self.run_cycle()
-                await asyncio.sleep(self.interval)
+            except Exception:
+                self.logger.exception("Cycle crashed (loop continues)")
 
-        except asyncio.CancelledError:
-            self.logger.info("TwitchMonitor cancelled.")
-            raise
-
-        except Exception:
-            self.logger.exception("Fatal monitor loop error")
-
-        finally:
-            self._running = False
+            await asyncio.sleep(self.interval)
 
     async def stop(self):
         self._running = False
-        self.logger.info("TwitchMonitor stopped.")
 
     # ==================================================
-    # CYCLE
+    # MAIN CYCLE
     # ==================================================
 
     async def run_cycle(self):
 
-        start = datetime.now(timezone.utc)
         self.monitor_cycles_total += 1
+        start = datetime.now(timezone.utc)
 
         try:
             await self.audit_eventsub_subscriptions()
             await self.reconcile_live_state()
+            await self.track_stream_changes()  # 🔥 NEW
             await self.refresh_badges()
             await self.check_drops()
 
-            duration = (
-                datetime.now(timezone.utc) - start
-            ).total_seconds()
+            duration = (datetime.now(timezone.utc) - start).total_seconds()
 
             self.logger.info(
                 "Monitor cycle completed",
-                extra={
-                    "extra_data": {
-                        "duration_sec": duration,
-                        "cycle": self.monitor_cycles_total
-                    }
-                }
+                extra={"extra_data": {
+                    "duration_sec": duration,
+                    "cycle": self.monitor_cycles_total
+                }}
             )
 
         except Exception:
@@ -134,19 +122,11 @@ class TwitchMonitor:
             }
 
             async with self.db_pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT broadcaster_id FROM streamers;"
-                )
+                rows = await conn.fetch("SELECT broadcaster_id FROM streamers;")
 
             db_ids = {r["broadcaster_id"] for r in rows}
 
             missing = db_ids - active_ids
-
-            if missing:
-                self.logger.warning(
-                    "Missing EventSub subscriptions",
-                    extra={"extra_data": {"missing": list(missing)}}
-                )
 
             for broadcaster_id in missing:
                 await self.eventsub_manager.subscribe_stream_online(
@@ -171,23 +151,16 @@ class TwitchMonitor:
                     WHERE is_live = TRUE;
                 """)
 
-            if not rows:
-                return
-
             broadcaster_ids = [r["broadcaster_id"] for r in rows]
 
             if not broadcaster_ids:
                 return
-
-            if len(broadcaster_ids) > 100:
-                broadcaster_ids = broadcaster_ids[:100]
 
             live_ids = await self.twitch_api.check_streams_live(
                 broadcaster_ids
             )
 
             if not live_ids:
-                self.logger.warning("Live check failed or empty result")
                 return
 
             to_reset = [
@@ -205,13 +178,74 @@ class TwitchMonitor:
                     WHERE broadcaster_id = ANY($1::text[]);
                 """, to_reset)
 
-            self.logger.info(
-                "Live state reconciled",
-                extra={"extra_data": {"reset_count": len(to_reset)}}
-            )
-
         except Exception:
             self.logger.exception("Live state reconciliation failed")
+
+    # ==================================================
+    # 🔥 NEW: STREAM CHANGE TRACKING
+    # ==================================================
+
+    async def track_stream_changes(self):
+
+        try:
+            async with self.db_pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT broadcaster_id, title, game_name
+                    FROM streamers
+                    WHERE is_live = TRUE;
+                """)
+
+            for row in rows:
+                bid = row["broadcaster_id"]
+
+                current = await self.twitch_api.get_stream_metadata(bid)
+                if not current:
+                    continue
+
+                cache_key = f"stream:{bid}"
+
+                prev = await self.redis.get(cache_key)
+
+                # First time → just cache
+                if not prev:
+                    await self.redis.set(cache_key, current, ex=300)
+                    continue
+
+                # Compare
+                if prev["title"] != current["title"] or prev["game"] != current["game"]:
+
+                    await self.redis.set(cache_key, current, ex=300)
+
+                    await self.notify_stream_change(
+                        bid,
+                        prev,
+                        current
+                    )
+
+        except Exception:
+            self.logger.exception("Stream change tracking failed")
+
+    # ==================================================
+    # 🔥 NOTIFICATION HOOK
+    # ==================================================
+
+    async def notify_stream_change(self, broadcaster_id, old, new):
+
+        self.logger.info(
+            "Stream changed",
+            extra={"extra_data": {
+                "broadcaster": broadcaster_id,
+                "old": old,
+                "new": new
+            }}
+        )
+
+        if self.notifier:
+            await self.notifier.stream_updated(
+                broadcaster_id,
+                old,
+                new
+            )
 
     # ==================================================
     # BADGES
@@ -220,7 +254,9 @@ class TwitchMonitor:
     async def refresh_badges(self):
 
         try:
-            await self.twitch_api.fetch_badges()
+            await self.twitch_api.fetch_badges(
+                redis=self.redis
+            )
         except Exception:
             self.logger.exception("Badge refresh failed")
 
