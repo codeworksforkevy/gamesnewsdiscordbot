@@ -1,51 +1,26 @@
 # services/diff_engine.py
 
-import logging
-import json
-
-logger = logging.getLogger("diff-engine")
+import hashlib
 
 
-async def get_new_items(redis, key, items):
+def _make_key(game):
+    base = f"{game['platform']}::{game['title']}"
+    return hashlib.sha256(base.encode()).hexdigest()
+
+
+def diff_games(old_games, new_games):
     """
-    Compare current items with previous cache.
-    Return ONLY new ones.
+    Returns only NEW games (not seen before)
     """
 
-    if not items:
-        return []
+    old_keys = {_make_key(g) for g in old_games}
+    new_keys = {_make_key(g) for g in new_games}
 
-    current_ids = {item["id"] for item in items if item.get("id")}
+    diff = []
 
-    old_ids = set()
+    for game in new_games:
+        key = _make_key(game)
+        if key not in old_keys:
+            diff.append(game)
 
-    # -------------------------
-    # LOAD OLD
-    # -------------------------
-    if redis:
-        try:
-            data = await redis.get(key)
-            if data:
-                if isinstance(data, bytes):
-                    data = data.decode("utf-8")
-                old_ids = set(json.loads(data))
-        except Exception:
-            logger.warning("Diff load failed")
-
-    # -------------------------
-    # DIFF
-    # -------------------------
-    new_ids = current_ids - old_ids
-
-    new_items = [item for item in items if item["id"] in new_ids]
-
-    # -------------------------
-    # SAVE NEW STATE
-    # -------------------------
-    if redis:
-        try:
-            await redis.set(key, json.dumps(list(current_ids)), ex=3600)
-        except Exception:
-            logger.warning("Diff save failed")
-
-    return new_items
+    return diff
