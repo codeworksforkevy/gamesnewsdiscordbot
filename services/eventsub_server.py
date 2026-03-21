@@ -1,31 +1,34 @@
 from aiohttp import web
+import logging
+
+logger = logging.getLogger("eventsub_server")
+
+bot_instance = None
 
 
-async def create_eventsub_app(bot, app_state):
+async def handle_eventsub(request: web.Request):
+
+    body = await request.text()
+
+    # Twitch challenge doğrulama
+    if "challenge" in body:
+        data = await request.json()
+        return web.Response(text=data["challenge"])
+
+    logger.info("Event received")
+
+    # burada ileride stream online event işlenir
+    return web.Response(status=200)
+
+
+# 🔥 MAIN'İN BEKLEDİĞİ FONKSİYON
+async def create_app(bot, app_state):
+
+    global bot_instance
+    bot_instance = bot
+
     app = web.Application()
 
-    # health check
-    async def health(request):
-        return web.json_response({"status": "ok"})
-
-    # Twitch EventSub webhook endpoint
-    async def eventsub_handler(request):
-        payload = await request.json()
-
-        # Twitch verification challenge
-        if "challenge" in payload:
-            return web.Response(text=payload["challenge"])
-
-        # Burada eventleri işle
-        # (stream.online, stream.offline vs.)
-        bot.logger.info(
-            "EventSub event received",
-            extra={"extra_data": payload}
-        )
-
-        return web.Response(text="OK")
-
-    app.router.add_post("/eventsub", eventsub_handler)
-    app.router.add_get("/", health)
+    app.router.add_post("/eventsub", handle_eventsub)
 
     return app
