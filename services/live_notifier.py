@@ -1,163 +1,160 @@
 import discord
-import logging
+import time
 from datetime import datetime, timezone
 
-from services.streamer_registry import (
-    get_guilds_for_streamer,
-    set_live_state
-)
-
-logger = logging.getLogger("live-notifier")
+from services.streamer_registry import get_guilds_for_streamer
 
 
-# ==================================================
-# LIVE NOTIFIER
-# ==================================================
-
-async def notify_live(bot: discord.Client, guild_id, event: dict):
-    """
-    Sends live notification embed to all registered guild channels.
-
-    Compatible with:
-        notify_live(bot, None, event)
-        notify_live(bot, guild_id, event)
-    """
-
-    if not event:
-        logger.warning("notify_live called without event data.")
-        return
+async def notify_live(bot, guild_id, event):
 
     db = bot.app_state.db
+    twitch_api = bot.app_state.twitch_api
 
-    broadcaster_id = event.get("broadcaster_user_id")
-    display_name = event.get("broadcaster_user_name")
-    login = event.get("broadcaster_user_login")
+    broadcaster_id = event["broadcaster_user_id"]
 
-    if not broadcaster_id:
-        logger.warning("Event missing broadcaster_user_id.")
+    stream = await twitch_api.get_stream(broadcaster_id)
+    user = await twitch_api.get_user(broadcaster_id)
+
+    if not stream:
         return
 
     rows = await get_guilds_for_streamer(db, broadcaster_id)
 
-    if not rows:
-        logger.info(
-            "No guilds registered",
-            extra={"extra_data": {"broadcaster_id": broadcaster_id}}
-        )
-        return
-
     for row in rows:
 
-        row_guild_id = row["guild_id"]
-        channel_id = int(row["channel_id"])
-        is_live = row["is_live"]
-
-        # Skip if already marked live (race safety)
-        if is_live:
+        if row["is_live"]:
             continue
 
-        channel = bot.get_channel(channel_id)
-
-        # Fallback fetch
-        if not channel:
-            try:
-                channel = await bot.fetch_channel(channel_id)
-            except Exception:
-                logger.warning(
-                    "Channel inaccessible",
-                    extra={"extra_data": {"channel_id": channel_id}}
-                )
-                continue
+        channel = bot.get_channel(int(row["channel_id"]))
 
         if not channel:
             continue
 
-        perms = channel.permissions_for(channel.guild.me)
+        thumbnail = stream["thumbnail_url"] \
+            .replace("{width}", "1280") \
+            .replace("{height}", "720")
 
-        if not (perms.send_messages and perms.embed_links):
-            logger.error(
-                "Missing permissions",
-                extra={"extra_data": {"channel_id": channel_id}}
-            )
-            continue
+        thumbnail += f"?t={int(time.time())}"
 
         embed = discord.Embed(
-            title=f"🔴 {display_name} is LIVE!",
-            url=f"https://twitch.tv/{login}",
-            description="Click to watch the stream.",
+            title=f"🔴 {user['display_name']} is LIVE!",
+            description=stream["title"],
+            url=f"https://twitch.tv/{user['login']}",
             color=0x9146FF,
             timestamp=datetime.now(timezone.utc)
         )
 
-        embed.set_footer(text="Twitch Live Notification")
+        embed.set_author(
+            name=user["display_name"],
+            icon_url=user["profile_image_url"]
+        )
 
-        try:
-            await channel.send(embed=embed)
+        embed.add_field(
+            name="Playing",
+            value=stream["game_name"],
+            inline=True
+        )
 
-            await set_live_state(
-                db,
-                row_guild_id,
-                broadcaster_id,
-                True
+        embed.set_image(url=thumbnail)
+
+        content = None
+        if row["role_id"]:
+            content = f"<@&{row['role_id']}> 🔴 LIVE NOW!"
+
+        msg = await channel.send(content=content, embed=embed)
+
+        pool = db.get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE streamers
+                SET is_live = TRUE,
+                    last_title = $1,
+                    last_game = $2,
+                    message_id = $3
+                WHERE guild_id = $4
+                AND broadcaster_id = $5;
+            """,
+                stream["title"],
+                stream["game_name"],
+                msg.id,
+                row["guild_id"],
+                broadcaster_id
             )
 
-            logger.info(
-                "Live notification sent",
-                extra={
-                    "extra_data": {
-                        "broadcaster_id": broadcaster_id,
-                        "guild_id": row_guild_id
-                    }
-                }
-            )
 
-        except Exception as e:
-            logger.error(
-                "Failed to send live notification",
-                extra={
-                    "extra_data": {
-                        "error": str(e),
-                        "channel_id": channel_id
-                    }
-                }
-            )
+# --------------------------------------------------
+# CHANGE DETECTION
+# --------------------------------------------------
 
-
-# ==================================================
-# OFFLINE HANDLER
-# ==================================================
-
-async def mark_offline(bot: discord.Client, event: dict):
-    """
-    Resets live state when stream goes offline.
-    """
-
-    if not event:
-        logger.warning("mark_offline called without event data.")
-        return
+async def handle_stream_update(bot, event):
 
     db = bot.app_state.db
+    twitch_api = bot.app_state.twitch_api
 
-    broadcaster_id = event.get("broadcaster_user_id")
-
-    if not broadcaster_id:
-        logger.warning("Offline event missing broadcaster_user_id.")
-        return
+    broadcaster_id = event["broadcaster_user_id"]
 
     rows = await get_guilds_for_streamer(db, broadcaster_id)
 
-    if not rows:
+    stream = await twitch_api.get_stream(broadcaster_id)
+
+    if not stream:
         return
 
     for row in rows:
-        await set_live_state(
-            db,
-            row["guild_id"],
-            broadcaster_id,
-            False
+
+        if not row["is_live"]:
+            continue
+
+        if stream["title"] == row["last_title"] and \
+           stream["game_name"] == row["last_game"]:
+            continue
+
+        channel = bot.get_channel(int(row["channel_id"]))
+        if not channel:
+            continue
+
+        try:
+            msg = await channel.fetch_message(row["message_id"])
+        except:
+            continue
+
+        embed = msg.embeds[0]
+        embed.description = stream["title"]
+
+        embed.set_field_at(
+            0,
+            name="Playing",
+            value=stream["game_name"],
+            inline=True
         )
 
-    logger.info(
-        "Live state reset",
-        extra={"extra_data": {"broadcaster_id": broadcaster_id}}
-    )
+        await msg.edit(embed=embed)
+
+
+# --------------------------------------------------
+# OFFLINE
+# --------------------------------------------------
+
+async def mark_offline(bot, event):
+
+    db = bot.app_state.db
+    broadcaster_id = event["broadcaster_user_id"]
+
+    rows = await get_guilds_for_streamer(db, broadcaster_id)
+
+    for row in rows:
+
+        channel = bot.get_channel(int(row["channel_id"]))
+        if not channel:
+            continue
+
+        try:
+            msg = await channel.fetch_message(row["message_id"])
+        except:
+            continue
+
+        embed = msg.embeds[0]
+        embed.color = 0x2F3136
+        embed.title = embed.title.replace("🔴", "⚫")
+
+        await msg.edit(embed=embed)
