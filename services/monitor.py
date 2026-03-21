@@ -14,6 +14,7 @@ class TwitchMonitor:
         db_pool,
         redis,
         notifier=None,
+        metadata_cache=None,
         telemetry=None,
         interval=180
     ):
@@ -22,13 +23,13 @@ class TwitchMonitor:
         self.db_pool = db_pool
         self.redis = redis
         self.notifier = notifier
+        self.metadata_cache = metadata_cache
         self.telemetry = telemetry
         self.interval = interval
 
         self.logger = logging.getLogger("twitch-monitor")
 
         self._running = False
-
         self.monitor_cycles_total = 0
         self.monitor_cycle_failures = 0
 
@@ -44,7 +45,7 @@ class TwitchMonitor:
                     self.LEADER_LOCK_ID
                 )
         except Exception:
-            self.logger.exception("Leader lock acquisition failed")
+            self.logger.exception("Leader lock failed")
             return False
 
     # ==================================================
@@ -56,20 +57,18 @@ class TwitchMonitor:
         if self._running:
             return
 
-        is_leader = await self.acquire_leader_lock()
-
-        if not is_leader:
-            self.logger.info("Not leader — monitor disabled.")
+        if not await self.acquire_leader_lock():
+            self.logger.info("Not leader — skipping monitor")
             return
 
         self._running = True
-        self.logger.info("TwitchMonitor started (leader).")
+        self.logger.info("TwitchMonitor started (leader)")
 
         while self._running:
             try:
                 await self.run_cycle()
             except Exception:
-                self.logger.exception("Cycle crashed (loop continues)")
+                self.logger.exception("Cycle crashed")
 
             await asyncio.sleep(self.interval)
 
@@ -77,7 +76,7 @@ class TwitchMonitor:
         self._running = False
 
     # ==================================================
-    # MAIN CYCLE
+    # CYCLE
     # ==================================================
 
     async def run_cycle(self):
@@ -88,7 +87,7 @@ class TwitchMonitor:
         try:
             await self.audit_eventsub_subscriptions()
             await self.reconcile_live_state()
-            await self.track_stream_changes()  # 🔥 NEW
+            await self.track_stream_changes()
             await self.refresh_badges()
             await self.check_drops()
 
@@ -125,12 +124,11 @@ class TwitchMonitor:
                 rows = await conn.fetch("SELECT broadcaster_id FROM streamers;")
 
             db_ids = {r["broadcaster_id"] for r in rows}
-
             missing = db_ids - active_ids
 
-            for broadcaster_id in missing:
+            for bid in missing:
                 await self.eventsub_manager.subscribe_stream_online(
-                    broadcaster_id,
+                    bid,
                     self.eventsub_manager.callback_url
                 )
 
@@ -156,9 +154,7 @@ class TwitchMonitor:
             if not broadcaster_ids:
                 return
 
-            live_ids = await self.twitch_api.check_streams_live(
-                broadcaster_ids
-            )
+            live_ids = await self.twitch_api.check_streams_live(broadcaster_ids)
 
             if not live_ids:
                 return
@@ -179,10 +175,10 @@ class TwitchMonitor:
                 """, to_reset)
 
         except Exception:
-            self.logger.exception("Live state reconciliation failed")
+            self.logger.exception("Live reconciliation failed")
 
     # ==================================================
-    # 🔥 NEW: STREAM CHANGE TRACKING
+    # 🔥 STREAM TRACKING (CORE)
     # ==================================================
 
     async def track_stream_changes(self):
@@ -190,7 +186,7 @@ class TwitchMonitor:
         try:
             async with self.db_pool.acquire() as conn:
                 rows = await conn.fetch("""
-                    SELECT broadcaster_id, title, game_name
+                    SELECT broadcaster_id
                     FROM streamers
                     WHERE is_live = TRUE;
                 """)
@@ -202,31 +198,33 @@ class TwitchMonitor:
                 if not current:
                     continue
 
-                cache_key = f"stream:{bid}"
+                prev = await self.metadata_cache.get(bid)
 
-                prev = await self.redis.get(cache_key)
-
-                # First time → just cache
                 if not prev:
-                    await self.redis.set(cache_key, current, ex=300)
+                    await self.metadata_cache.set(bid, current)
                     continue
 
-                # Compare
-                if prev["title"] != current["title"] or prev["game"] != current["game"]:
+                if self._has_changed(prev, current):
+                    await self.metadata_cache.set(bid, current)
 
-                    await self.redis.set(cache_key, current, ex=300)
-
-                    await self.notify_stream_change(
-                        bid,
-                        prev,
-                        current
-                    )
+                    await self.notify_stream_change(bid, prev, current)
 
         except Exception:
-            self.logger.exception("Stream change tracking failed")
+            self.logger.exception("Stream tracking failed")
 
     # ==================================================
-    # 🔥 NOTIFICATION HOOK
+    # DIFF LOGIC
+    # ==================================================
+
+    def _has_changed(self, old, new):
+
+        return (
+            old.get("title") != new.get("title")
+            or old.get("game") != new.get("game")
+        )
+
+    # ==================================================
+    # NOTIFICATION
     # ==================================================
 
     async def notify_stream_change(self, broadcaster_id, old, new):
@@ -254,9 +252,7 @@ class TwitchMonitor:
     async def refresh_badges(self):
 
         try:
-            await self.twitch_api.fetch_badges(
-                redis=self.redis
-            )
+            await self.twitch_api.fetch_badges(redis=self.redis)
         except Exception:
             self.logger.exception("Badge refresh failed")
 
@@ -269,7 +265,7 @@ class TwitchMonitor:
         try:
             await self.twitch_api.fetch_drops()
         except Exception:
-            self.logger.exception("Drops check failed")
+            self.logger.exception("Drops failed")
 
     # ==================================================
     # METRICS
@@ -278,6 +274,6 @@ class TwitchMonitor:
     def get_metrics(self):
 
         return {
-            "monitor_cycles_total": self.monitor_cycles_total,
-            "monitor_cycle_failures": self.monitor_cycle_failures
+            "cycles": self.monitor_cycles_total,
+            "failures": self.monitor_cycle_failures
         }
