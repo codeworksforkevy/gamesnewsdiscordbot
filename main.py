@@ -107,18 +107,30 @@ bot.logger = logger
 
 @bot.event
 async def on_ready():
-    logger.info("Bot ready", extra={"extra_data": {"user": str(bot.user)}})
+    logger.info(
+        "Bot ready",
+        extra={"extra_data": {"user": str(bot.user)}}
+    )
 
     try:
         await startup_sync(bot)
     except Exception as e:
-        logger.exception("Startup failed", extra={"extra_data": {"error": str(e)}})
+        logger.exception(
+            "Startup failed",
+            extra={"extra_data": {"error": str(e)}}
+        )
 
     try:
         synced = await bot.tree.sync()
-        logger.info("Slash synced", extra={"extra_data": {"count": len(synced)}})
+        logger.info(
+            "Slash synced",
+            extra={"extra_data": {"count": len(synced)}}
+        )
     except Exception as e:
-        logger.exception("Slash sync failed", extra={"extra_data": {"error": str(e)}})
+        logger.exception(
+            "Slash sync failed",
+            extra={"extra_data": {"error": str(e)}}
+        )
 
 
 # ==================================================
@@ -149,19 +161,28 @@ async def start_web_server(bot, app_state, monitor):
 
     await site.start()
 
-    logger.info("Web server started", extra={"extra_data": {"port": port}})
+    logger.info(
+        "Web server started",
+        extra={"extra_data": {"port": port}}
+    )
 
     return runner
 
 
 # ==================================================
-# FREE GAMES LOOP
+# FREE GAMES LOOP (UPDATED)
 # ==================================================
 
-async def free_games_loop(session):
+async def free_games_loop(session, bot, redis_client):
+
     while True:
         try:
-            await update_free_games_cache(session)
+            await update_free_games_cache(
+                session,
+                bot=bot,
+                redis=redis_client
+            )
+
         except Exception as e:
             logger.error(
                 "Free games failed",
@@ -184,6 +205,7 @@ async def main():
     # -------------------------
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
+
     logger.info("Database connected")
 
     # -------------------------
@@ -192,13 +214,20 @@ async def main():
     await init_cache()
 
     redis_client = None
+
     if REDIS_URL:
         try:
             import redis.asyncio as redis
+
             redis_client = RedisClient(redis.from_url(REDIS_URL))
+
             logger.info("Redis client initialized")
+
         except Exception as e:
-            logger.warning("Redis init failed", extra={"extra_data": {"error": str(e)}})
+            logger.warning(
+                "Redis init failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
 
     # -------------------------
     # HTTP SESSION
@@ -221,6 +250,7 @@ async def main():
         # COMMANDS
         # -------------------------
         register_live_commands(bot)
+
         await register_discounts(bot, session)
         await register_free_games(bot, session)
         await register_membership(bot, session)
@@ -231,7 +261,9 @@ async def main():
         # -------------------------
         # BACKGROUND TASKS
         # -------------------------
-        free_task = asyncio.create_task(free_games_loop(session))
+        free_task = asyncio.create_task(
+            free_games_loop(session, bot, redis_client)
+        )
 
         monitor = TwitchMonitor(
             bot=bot,
@@ -240,7 +272,7 @@ async def main():
             interval=180
         )
 
-        monitor.start()  # ✅ FIX
+        monitor.start()
 
         runner = await start_web_server(bot, app_state, monitor)
 
@@ -268,6 +300,7 @@ async def main():
         # CLEANUP
         # -------------------------
         monitor.stop()
+
         free_task.cancel()
         bot_task.cancel()
 
