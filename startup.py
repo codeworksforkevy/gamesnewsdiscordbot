@@ -1,6 +1,10 @@
 import discord
 import logging
 import asyncio
+import time
+
+from db.guild_settings import get_guild_settings
+from core.state_manager import state_manager
 
 logger = logging.getLogger("startup")
 
@@ -8,10 +12,8 @@ logger = logging.getLogger("startup")
 # ==================================================
 # LIVE ROLE SETUP
 # ==================================================
-
 async def ensure_live_role(guild: discord.Guild):
 
-    # "Live" rolünü bul
     role = discord.utils.get(guild.roles, name="Live")
 
     if role:
@@ -22,7 +24,7 @@ async def ensure_live_role(guild: discord.Guild):
     try:
         return await guild.create_role(
             name="Live",
-            color=discord.Color.from_rgb(137, 207, 240),  # Baby Blue
+            color=discord.Color.from_rgb(137, 207, 240),
             mentionable=True
         )
 
@@ -37,7 +39,6 @@ async def ensure_live_role(guild: discord.Guild):
 # ==================================================
 # STARTUP SYNC
 # ==================================================
-
 async def startup_sync(bot):
 
     logger.info("🚀 Startup sync started")
@@ -45,24 +46,80 @@ async def startup_sync(bot):
     db = bot.app_state.db
     eventsub = bot.app_state.eventsub_manager
 
-    # Guild'leri yükle (cache warm-up)
-    await asyncio.gather(*[guild.chunk() for guild in bot.guilds])
+    # =========================
+    # GUILD CACHE WARMUP
+    # =========================
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*[guild.chunk() for guild in bot.guilds]),
+            timeout=10
+        )
+    except Exception as e:
+        logger.warning(f"Guild chunking warning: {e}")
 
+    # =========================
+    # GUILD LOOP
+    # =========================
     for guild in bot.guilds:
 
         try:
-            # 1. LIVE ROLE garanti
+            logger.info(f"Processing guild: {guild.name} ({guild.id})")
+
+            # =========================
+            # LOAD CONFIG FROM DB
+            # =========================
+            settings = await get_guild_settings(db, guild.id)
+
+            if not settings:
+                logger.warning(f"No settings found for guild {guild.id}")
+                continue
+
+            channel_id = settings["announce_channel_id"]
+
+            if not channel_id:
+                logger.warning(f"No announce channel for guild {guild.id}")
+                continue
+
+            # =========================
+            # ENSURE LIVE ROLE
+            # =========================
             live_role = await ensure_live_role(guild)
 
-            # 2. DB streamer'ları çek
+            if live_role:
+                bot.app_state.live_roles[guild.id] = live_role.id
+
+            # =========================
+            # SAVE STATE (STATE MANAGER)
+            # =========================
+            await state_manager.set_guild_state(
+                guild.id,
+                {
+                    "channel_id": channel_id,
+                    "live_role_id": getattr(live_role, "id", None),
+                }
+            )
+
+            # =========================
+            # FETCH STREAMERS
+            # =========================
             streamers = await db.fetch(
-                "SELECT twitch_user_id, twitch_login FROM streamers WHERE guild_id=$1",
+                """
+                SELECT twitch_user_id, twitch_login
+                FROM streamers
+                WHERE guild_id = $1
+                """,
                 guild.id
             )
 
-            logger.info(f"{guild.name} → {len(streamers)} streamer found")
+            logger.info(f"{guild.name} → {len(streamers)} streamer(s) found")
 
-            # 3. EventSub tekrar subscribe et
+            # =========================
+            # EVENTSUB SUBSCRIPTIONS
+            # =========================
+            if not eventsub:
+                logger.warning("EventSub manager not available")
+                continue
+
             for s in streamers:
 
                 broadcaster_id = s["twitch_user_id"]
@@ -77,13 +134,15 @@ async def startup_sync(bot):
                     logger.info(f"Subscribed: {twitch_login}")
 
                 except Exception as e:
-                    logger.error(f"Subscription failed ({twitch_login}): {e}")
-
-            # 4. Live role cache (opsiyonel future use)
-            if live_role:
-                bot.app_state.live_roles[guild.id] = live_role.id
+                    logger.error(
+                        f"Subscription failed ({twitch_login})",
+                        extra={"error": str(e)}
+                    )
 
         except Exception as e:
-            logger.error(f"Startup error in guild {guild.id}: {e}")
+            logger.error(
+                f"Startup error in guild {guild.id}",
+                extra={"error": str(e)}
+            )
 
     logger.info("✅ Startup sync completed")
