@@ -1,5 +1,3 @@
-# services/gog.py
-
 import logging
 import json
 
@@ -42,19 +40,36 @@ def _build_image(img):
     return f"https:{img}"
 
 
+def _extract_price(price_data):
+    """
+    Normalize price info (UX improvement)
+    """
+    if not isinstance(price_data, dict):
+        return {}
+
+    return {
+        "is_free": bool(
+            price_data.get("isFree") or price_data.get("finalAmount") == "0.00"
+        ),
+        "final": price_data.get("finalAmount"),
+        "currency": price_data.get("currency")
+    }
+
+
 # ==================================================
 # FETCH GOG FREE GAMES
 # ==================================================
 
 async def fetch_gog_free(session, redis=None):
-    """
-    Production-grade GOG free games fetcher
-    """
 
     logger.info("[GOG] fetch start")
 
+    # -------------------------
+    # FETCH WITH RETRY
+    # -------------------------
     try:
         text = await fetch_with_retry(session, GOG_ENDPOINT)
+
         inc("gog_fetch_success")
 
     except Exception as e:
@@ -66,14 +81,29 @@ async def fetch_gog_free(session, redis=None):
         )
         return []
 
-    logger.info(f"[GOG] response size: {len(text)}")
+    # -------------------------
+    # DEBUG LOG
+    # -------------------------
+    logger.info(
+        "[GOG] response size",
+        extra={"extra_data": {"size": len(text)}}
+    )
 
+    # -------------------------
+    # JSON PARSE SAFE
+    # -------------------------
     try:
         data = json.loads(text)
-    except Exception:
-        logger.warning("GOG JSON decode failed")
+    except Exception as e:
+        logger.warning(
+            "GOG JSON decode failed",
+            extra={"extra_data": {"error": str(e)}}
+        )
         return []
 
+    # -------------------------
+    # VALIDATION
+    # -------------------------
     products = data.get("products")
 
     if not isinstance(products, list):
@@ -82,22 +112,21 @@ async def fetch_gog_free(session, redis=None):
 
     offers = []
 
+    # -------------------------
+    # PARSE PRODUCTS
+    # -------------------------
     for item in products:
+
         try:
-            price_data = item.get("price", {})
+            price_data = _extract_price(item.get("price"))
 
             # -------------------------
             # FREE FILTER
             # -------------------------
-            is_free = (
-                price_data.get("isFree")
-                or price_data.get("finalAmount") == "0.00"
-            )
-
-            if not is_free:
+            if not price_data.get("is_free"):
                 continue
 
-            title = _safe_str(item.get("title")) or "Unknown Title"
+            title = _safe_str(item.get("title"))
 
             if not title:
                 continue
@@ -108,6 +137,12 @@ async def fetch_gog_free(session, redis=None):
                 "platform": "GOG",
                 "url": _build_url(item.get("url")),
                 "thumbnail": _build_image(item.get("image")),
+
+                # UX ENHANCEMENT
+                "price": "Free",
+                "currency": price_data.get("currency"),
+                "expires": None,  # GOG genelde expiry vermez
+                "store": "GOG"
             }
 
             offers.append(game)
@@ -120,12 +155,15 @@ async def fetch_gog_free(session, redis=None):
             continue
 
     # -------------------------
-    # DEDUP
+    # DEDUP (LOCAL SAFETY)
     # -------------------------
     unique = {}
+
     for g in offers:
-        key = f"{g['platform']}-{g['title']}"
-        unique[key] = g
+        key = g["title"]
+
+        if key not in unique:
+            unique[key] = g
 
     offers = list(unique.values())
 
@@ -134,6 +172,9 @@ async def fetch_gog_free(session, redis=None):
     # -------------------------
     inc("gog_games_found", len(offers))
 
+    # -------------------------
+    # FINAL LOG
+    # -------------------------
     logger.info(
         "GOG games fetched",
         extra={"extra_data": {"count": len(offers)}}
