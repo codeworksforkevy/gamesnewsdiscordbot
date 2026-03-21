@@ -12,6 +12,8 @@ from services.luna import fetch_luna_free
 from services.steam import fetch_steam_free
 
 from services.redis_client import RedisClient
+from services.diff_engine import get_new_items
+from services.notifier import notify_new_games
 
 logger = logging.getLogger("free-games-service")
 
