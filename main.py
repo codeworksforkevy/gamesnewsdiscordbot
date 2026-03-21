@@ -56,6 +56,7 @@ logger = logging.getLogger("bot")
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
+intents.message_content = True  # 🔥 EKLE
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
