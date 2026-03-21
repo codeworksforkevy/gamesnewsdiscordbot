@@ -1,126 +1,176 @@
+# services/epic.py
+
 import logging
 import datetime as dt
-from aiohttp import ClientTimeout
+import json
+
+from services.http_utils import fetch_with_retry
+from services.metrics import inc
 
 logger = logging.getLogger("epic-service")
 
 EPIC_ENDPOINT = (
-    "https://store-site-backend-static-ipv4.ak.epicgames.com/"
+    "https://store-site-backend-static.ak.epicgames.com/"
     "freeGamesPromotions"
 )
+
+
+# ==================================================
+# HELPERS
+# ==================================================
+
+def _safe_get(d, *keys):
+    for k in keys:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(k)
+    return d
+
+
+def _extract_image(images):
+    if not images:
+        return None
+
+    for img in images:
+        if img.get("type") == "OfferImageWide":
+            return img.get("url")
+
+    return images[0].get("url")
+
+
+def _build_url(el):
+    slug = el.get("productSlug") or el.get("urlSlug")
+
+    if slug:
+        return f"https://store.epicgames.com/en-US/p/{slug}"
+
+    return "https://store.epicgames.com/"
 
 
 # ==================================================
 # FETCH EPIC FREE GAMES
 # ==================================================
 
-async def fetch_epic_free(session):
+async def fetch_epic_free(session, redis=None):
     """
-    Fetch currently active free games from Epic Games Store.
+    Production-grade Epic free games fetcher
     """
 
-    timeout = ClientTimeout(total=15)
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        ),
-        "Accept": "application/json"
-    }
+    logger.info("[Epic] fetch start")
 
     try:
-        async with session.get(
-            EPIC_ENDPOINT,
-            timeout=timeout,
-            headers=headers
-        ) as resp:
-
-            if resp.status != 200:
-                logger.warning(
-                    "Epic non-200 response",
-                    extra={"extra_data": {"status": resp.status}}
-                )
-                return []
-
-            data = await resp.json()
+        text = await fetch_with_retry(session, EPIC_ENDPOINT)
+        inc("epic_fetch_success")
 
     except Exception as e:
+        inc("epic_fetch_fail")
+
         logger.warning(
             "Epic fetch failed",
             extra={"extra_data": {"error": str(e)}}
         )
         return []
 
-    offers = []
+    logger.info(f"[Epic] response size: {len(text)}")
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        logger.warning("Epic JSON decode failed")
+        return []
+
+    elements = _safe_get(
+        data,
+        "data",
+        "Catalog",
+        "searchStore",
+        "elements"
+    ) or []
 
     now = dt.datetime.now(dt.timezone.utc)
 
-    try:
-        elements = (
-            data.get("data", {})
-            .get("Catalog", {})
-            .get("searchStore", {})
-            .get("elements", [])
-        )
-    except Exception:
-        logger.warning("Epic response structure unexpected")
-        return []
+    offers = []
 
     for el in elements:
 
-        promotions = el.get("promotions")
-        if not promotions:
+        try:
+            promotions = el.get("promotions")
+            if not promotions:
+                continue
+
+            promo_groups = promotions.get("promotionalOffers", [])
+
+            if not promo_groups:
+                continue
+
+            for group in promo_groups:
+                for offer in group.get("promotionalOffers", []):
+
+                    # -------------------------
+                    # DATE FILTER
+                    # -------------------------
+                    try:
+                        start = dt.datetime.fromisoformat(
+                            offer["startDate"].replace("Z", "+00:00")
+                        )
+                        end = dt.datetime.fromisoformat(
+                            offer["endDate"].replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        continue
+
+                    if not (start <= now <= end):
+                        continue
+
+                    # -------------------------
+                    # PRICE CHECK (extra safety)
+                    # -------------------------
+                    price = _safe_get(el, "price", "totalPrice", "discountPrice")
+
+                    if price is not None and price != 0:
+                        continue
+
+                    # -------------------------
+                    # BUILD OBJECT
+                    # -------------------------
+                    title = el.get("title") or "Unknown Title"
+
+                    if not title:
+                        continue
+
+                    game = {
+                        "id": f"epic-{el.get('id') or title}",
+                        "title": title.strip(),
+                        "platform": "Epic",
+                        "url": _build_url(el),
+                        "thumbnail": _extract_image(el.get("keyImages")),
+                        "start_date": start.isoformat(),
+                        "end_date": end.isoformat(),
+                    }
+
+                    offers.append(game)
+
+        except Exception as e:
+            logger.warning(
+                "Epic item parse failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
             continue
 
-        promotional_groups = promotions.get("promotionalOffers", [])
+    # -------------------------
+    # DEDUPLICATION
+    # -------------------------
+    unique = {}
+    for g in offers:
+        key = f"{g['platform']}-{g['title']}"
+        unique[key] = g
 
-        for group in promotional_groups:
-            for offer in group.get("promotionalOffers", []):
+    offers = list(unique.values())
 
-                try:
-                    start = dt.datetime.fromisoformat(
-                        offer["startDate"].replace("Z", "+00:00")
-                    )
-                    end = dt.datetime.fromisoformat(
-                        offer["endDate"].replace("Z", "+00:00")
-                    )
-                except Exception:
-                    continue
-
-                # Active free window
-                if not (start <= now <= end):
-                    continue
-
-                # Thumbnail
-                image = None
-                for img in el.get("keyImages", []):
-                    if img.get("type") == "OfferImageWide":
-                        image = img.get("url")
-                        break
-
-                if not image and el.get("keyImages"):
-                    image = el["keyImages"][0].get("url")
-
-                # URL
-                slug = el.get("productSlug") or el.get("urlSlug")
-
-                if slug:
-                    url = f"https://store.epicgames.com/en-US/p/{slug}"
-                else:
-                    url = "https://store.epicgames.com/"
-
-                offers.append({
-                    "platform": "Epic",
-                    "title": el.get("title", "Unknown Title"),
-                    "url": url,
-                    "thumbnail": image
-                })
-
-    # Deduplicate (safety)
-    unique = {o["title"]: o for o in offers}.values()
-    offers = list(unique)
+    # -------------------------
+    # METRICS
+    # -------------------------
+    inc("epic_games_found", len(offers))
 
     logger.info(
         "Epic games fetched",
