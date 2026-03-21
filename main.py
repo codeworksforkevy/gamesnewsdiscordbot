@@ -56,7 +56,7 @@ logger = logging.getLogger("bot")
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
-intents.message_content = True  # 🔥 EKLE
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -71,12 +71,13 @@ from services.cache import CacheManager
 from services.fetch_router import FetchRouter
 
 from services.free_games_service import update_free_games_cache, init_cache
-
 from services.redis_client import RedisClient
 
 from startup import startup_sync
 
+# ⚠️ IMPORTANT: register_live_commands artık app_state alıyor
 from commands.live_commands import register_live_commands
+
 from commands.discounts import register as register_discounts
 from commands.free_games import register as register_free_games
 from commands.membership import register as register_membership
@@ -98,7 +99,7 @@ bot.logger = logger
 
 
 # ==================================================
-# FREE GAME LOOP (WITH DEDUP)
+# FREE GAME LOOP
 # ==================================================
 
 async def free_games_loop(session, bot, cache):
@@ -107,7 +108,7 @@ async def free_games_loop(session, bot, cache):
         try:
             key = "free_games"
 
-            if await cache.is_duplicate(key):
+            if cache and await cache.is_duplicate(key):
                 logger.info("Duplicate fetch skipped")
             else:
                 await update_free_games_cache(session, bot=bot, redis=cache)
@@ -153,17 +154,22 @@ async def main():
 
     shutdown_event = asyncio.Event()
 
+    # -------------------------
     # DB
+    # -------------------------
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
 
+    # -------------------------
     # REDIS
+    # -------------------------
     cache = None
     redis_client = None
 
     if REDIS_URL:
         try:
             import redis.asyncio as redis
+
             raw = redis.from_url(REDIS_URL)
 
             redis_client = RedisClient(raw)
@@ -176,19 +182,29 @@ async def main():
         except Exception as e:
             logger.warning(f"Redis fallback: {e}")
 
-    # HTTP
+    # -------------------------
+    # HTTP SESSION
+    # -------------------------
     timeout = ClientTimeout(total=15)
 
     async with ClientSession(timeout=timeout) as session:
 
         app_state.cache = cache
 
+        # -------------------------
         # SERVICES
+        # -------------------------
         from services import twitch_api
         app_state.twitch_api = twitch_api.TwitchAPI(session)
 
-        # COMMANDS
-        register_live_commands(bot)
+        # -------------------------
+        # COMMANDS (REGISTRATION ORDER FIXED)
+        # -------------------------
+
+        # ⚠️ FIX: live commands now needs app_state
+        register_live_commands(bot, app_state)
+
+        # async olanlar await edilmeli
         await register_discounts(bot, session)
         await register_free_games(bot, session)
         await register_membership(bot, session)
@@ -196,17 +212,26 @@ async def main():
         await register_utilities(bot)
         await register_help(bot)
 
+        # -------------------------
         # LOOP
+        # -------------------------
         free_task = asyncio.create_task(
             free_games_loop(session, bot, cache)
         )
 
+        # -------------------------
         # WEB
+        # -------------------------
         runner = await start_web_server(bot, app_state)
 
+        # -------------------------
+        # BOT START
+        # -------------------------
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
 
-        # SIGNAL
+        # -------------------------
+        # SIGNAL HANDLING
+        # -------------------------
         loop = asyncio.get_running_loop()
 
         def _shutdown():
@@ -220,13 +245,22 @@ async def main():
 
         await shutdown_event.wait()
 
+        # -------------------------
+        # CLEANUP
+        # -------------------------
         free_task.cancel()
         bot_task.cancel()
 
-        await asyncio.gather(free_task, bot_task, return_exceptions=True)
+        await asyncio.gather(
+            free_task,
+            bot_task,
+            return_exceptions=True
+        )
 
         await runner.cleanup()
-        await app_state.db.close()
+
+        if app_state.db:
+            await app_state.db.close()
 
         logger.info("Shutdown complete")
 
