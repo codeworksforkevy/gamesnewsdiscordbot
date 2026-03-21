@@ -1,180 +1,139 @@
-# services/epic.py
-
-import logging
-import datetime as dt
 import json
+import logging
+from typing import List, Dict
 
-from services.http_utils import fetch_with_retry
-from services.metrics import inc
+from services.epic import fetch_epic_free
+from services.gog import fetch_gog_free
+from services.diff_engine import diff_games
+from services.notifier import notify_discord
 
-logger = logging.getLogger("epic-service")
+logger = logging.getLogger("free-games")
 
-EPIC_ENDPOINT = (
-    "https://store-site-backend-static.ak.epicgames.com/"
-    "freeGamesPromotions"
-)
-
-
-# ==================================================
-# HELPERS
-# ==================================================
-
-def _safe_get(d, *keys):
-    for k in keys:
-        if not isinstance(d, dict):
-            return None
-        d = d.get(k)
-    return d
-
-
-def _extract_image(images):
-    if not images:
-        return None
-
-    for img in images:
-        if img.get("type") == "OfferImageWide":
-            return img.get("url")
-
-    return images[0].get("url")
-
-
-def _build_url(el):
-    slug = el.get("productSlug") or el.get("urlSlug")
-
-    if slug:
-        return f"https://store.epicgames.com/en-US/p/{slug}"
-
-    return "https://store.epicgames.com/"
+CACHE_KEY = "free_games_cache"
+_memory_cache: List[Dict] = []
 
 
 # ==================================================
-# FETCH EPIC FREE GAMES
+# CACHE INIT
 # ==================================================
-
-async def fetch_epic_free(session, redis=None):
-    """
-    Production-grade Epic free games fetcher
-    """
-
-    logger.info("[Epic] fetch start")
+async def init_cache(redis=None):
+    if not redis:
+        return
 
     try:
-        text = await fetch_with_retry(session, EPIC_ENDPOINT)
-        inc("epic_fetch_success")
+        if not await redis.exists(CACHE_KEY):
+            await redis.set(CACHE_KEY, json.dumps([]))
+    except Exception as e:
+        logger.warning(f"Cache init failed: {e}")
+
+
+# ==================================================
+# GET CACHE
+# ==================================================
+async def get_cached_free_games(redis=None):
+    global _memory_cache
+
+    if not redis:
+        return _memory_cache
+
+    try:
+        cached = await redis.get(CACHE_KEY)
+
+        if not cached:
+            return _memory_cache
+
+        if isinstance(cached, bytes):
+            cached = cached.decode()
+
+        data = json.loads(cached)
+
+        if not isinstance(data, list):
+            return _memory_cache
+
+        _memory_cache = data
+        return data
 
     except Exception as e:
-        inc("epic_fetch_fail")
+        logger.warning(f"Cache read failed: {e}")
+        return _memory_cache
 
-        logger.warning(
-            "Epic fetch failed",
-            extra={"extra_data": {"error": str(e)}}
-        )
-        return []
 
-    logger.info(f"[Epic] response size: {len(text)}")
+# ==================================================
+# NORMALIZATION (UX IMPROVEMENT)
+# ==================================================
+def _normalize_game(game: Dict) -> Dict:
+    """
+    UX layer:
+    - ensures consistency
+    - adds fallback fields
+    """
+
+    return {
+        "id": game.get("id"),
+        "title": game.get("title", "Unknown"),
+        "platform": game.get("platform"),
+        "url": game.get("url"),
+        "thumbnail": game.get("thumbnail"),
+        "start_date": game.get("start_date"),
+        "end_date": game.get("end_date"),
+
+        # UX enrichments
+        "description": f"Free on {game.get('platform')}",
+        "tags": ["free", game.get("platform", "").lower()],
+    }
+
+
+# ==================================================
+# UPDATE PIPELINE (CORE)
+# ==================================================
+async def update_free_games_cache(session, bot=None, redis=None):
+
+    global _memory_cache
 
     try:
-        data = json.loads(text)
-    except Exception:
-        logger.warning("Epic JSON decode failed")
-        return []
+        # -------------------------
+        # FETCH (ISOLATED)
+        # -------------------------
+        epic = await fetch_epic_free(session)
+        gog = await fetch_gog_free(session)
 
-    elements = _safe_get(
-        data,
-        "data",
-        "Catalog",
-        "searchStore",
-        "elements"
-    ) or []
+        new_games = epic + gog
 
-    now = dt.datetime.now(dt.timezone.utc)
+        # normalize
+        new_games = [_normalize_game(g) for g in new_games]
 
-    offers = []
+        # -------------------------
+        # LOAD OLD CACHE
+        # -------------------------
+        old_games = await get_cached_free_games(redis)
 
-    for el in elements:
+        # -------------------------
+        # DIFF
+        # -------------------------
+        new_only = diff_games(old_games, new_games)
 
-        try:
-            promotions = el.get("promotions")
-            if not promotions:
-                continue
+        if not new_only:
+            logger.info("No new games")
+            return
 
-            promo_groups = promotions.get("promotionalOffers", [])
+        logger.info(f"New games: {len(new_only)}")
 
-            if not promo_groups:
-                continue
+        # -------------------------
+        # NOTIFY
+        # -------------------------
+        if bot:
+            try:
+                await notify_discord(bot, new_only)
+            except Exception as e:
+                logger.warning(f"Notify failed: {e}")
 
-            for group in promo_groups:
-                for offer in group.get("promotionalOffers", []):
+        # -------------------------
+        # UPDATE CACHE
+        # -------------------------
+        _memory_cache = new_games
 
-                    # -------------------------
-                    # DATE FILTER
-                    # -------------------------
-                    try:
-                        start = dt.datetime.fromisoformat(
-                            offer["startDate"].replace("Z", "+00:00")
-                        )
-                        end = dt.datetime.fromisoformat(
-                            offer["endDate"].replace("Z", "+00:00")
-                        )
-                    except Exception:
-                        continue
+        if redis:
+            await redis.set(CACHE_KEY, json.dumps(new_games))
 
-                    if not (start <= now <= end):
-                        continue
-
-                    # -------------------------
-                    # PRICE CHECK (extra safety)
-                    # -------------------------
-                    price = _safe_get(el, "price", "totalPrice", "discountPrice")
-
-                    if price is not None and price != 0:
-                        continue
-
-                    # -------------------------
-                    # BUILD OBJECT
-                    # -------------------------
-                    title = el.get("title") or "Unknown Title"
-
-                    if not title:
-                        continue
-
-                    game = {
-                        "id": f"epic-{el.get('id') or title}",
-                        "title": title.strip(),
-                        "platform": "Epic",
-                        "url": _build_url(el),
-                        "thumbnail": _extract_image(el.get("keyImages")),
-                        "start_date": start.isoformat(),
-                        "end_date": end.isoformat(),
-                    }
-
-                    offers.append(game)
-
-        except Exception as e:
-            logger.warning(
-                "Epic item parse failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
-            continue
-
-    # -------------------------
-    # DEDUPLICATION
-    # -------------------------
-    unique = {}
-    for g in offers:
-        key = f"{g['platform']}-{g['title']}"
-        unique[key] = g
-
-    offers = list(unique.values())
-
-    # -------------------------
-    # METRICS
-    # -------------------------
-    inc("epic_games_found", len(offers))
-
-    logger.info(
-        "Epic games fetched",
-        extra={"extra_data": {"count": len(offers)}}
-    )
-
-    return offers
+    except Exception as e:
+        logger.error(f"Pipeline failed: {e}")
