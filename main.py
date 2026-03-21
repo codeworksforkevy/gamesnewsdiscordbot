@@ -54,7 +54,7 @@ logger = logging.getLogger("bot")
 
 
 # ==================================================
-# DISCORD SETUP
+# DISCORD
 # ==================================================
 
 intents = discord.Intents.default()
@@ -66,12 +66,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 # ==================================================
-# IMPORTS (LAZY SAFE)
+# IMPORTS
 # ==================================================
 
 from services.db import Database
 from services.state import AppState
-from services.eventsub_server import create_eventsub_app
 
 from services.free_games_service import (
     update_free_games_cache,
@@ -101,28 +100,25 @@ bot.logger = logger
 
 
 # ==================================================
-# READY EVENT
+# READY
 # ==================================================
 
 @bot.event
 async def on_ready():
-
     logger.info(
         "Bot ready",
         extra={"extra_data": {"user": str(bot.user)}}
     )
 
-    # 🔥 startup sync
     try:
         await startup_sync(bot)
     except Exception as e:
         logger.exception(f"Startup failed: {e}")
 
-    # slash sync
     try:
         synced = await bot.tree.sync()
         logger.info(
-            "Slash commands synced",
+            "Slash synced",
             extra={"extra_data": {"count": len(synced)}}
         )
     except Exception as e:
@@ -139,7 +135,6 @@ async def start_web_server(bot, app_state, monitor):
         return web.json_response({"status": "ok"})
 
     async def metrics(_):
-
         m = monitor.get_metrics()
 
         return web.Response(
@@ -150,9 +145,8 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
             content_type="text/plain"
         )
 
-    app = await create_eventsub_app(bot, app_state)
+    app = await eventsub_server.create_app(bot, app_state)
 
-    # attach bot
     app.state.bot = bot
 
     app.router.add_get("/", health)
@@ -163,12 +157,7 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
 
     port = int(os.getenv("PORT", "8080"))
 
-    site = web.TCPSite(
-        runner,
-        host="0.0.0.0",
-        port=port
-    )
-
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
     logger.info("Web server started", extra={"extra_data": {"port": port}})
@@ -181,15 +170,11 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
 # ==================================================
 
 async def free_games_loop(session):
-
     while True:
         try:
             await update_free_games_cache(session)
         except Exception as e:
-            logger.error(
-                "Free games update failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
+            logger.error("Free games failed", extra={"extra_data": {"error": str(e)}})
 
         await asyncio.sleep(1800)
 
@@ -202,45 +187,39 @@ async def main():
 
     shutdown_event = asyncio.Event()
 
-    # -------------------------------------------------
     # DB
-    # -------------------------------------------------
-
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
 
     logger.info("Database connected")
 
-    # -------------------------------------------------
     # CACHE
-    # -------------------------------------------------
-
     await init_cache()
-
-    # -------------------------------------------------
-    # SESSION
-    # -------------------------------------------------
 
     async with ClientSession() as session:
 
-        # -------------------------------------------------
-        # INIT SERVICES (IMPORTANT)
-        # -------------------------------------------------
-
+        # TWITCH API
         from services.twitch_api import init_twitch_api
-
         app_state.twitch_api = await init_twitch_api()
+
+        # ==================================================
+        # EVENTSUB MANAGER (FIXED)
+        # ==================================================
 
         from services.eventsub_manager import EventSubManager
 
-        app_state.eventsub_manager = EventSubManager(session)
+        app_state.eventsub_manager = EventSubManager(
+            twitch_api=app_state.twitch_api,
+            session=session,
+            db=app_state.db
+        )
 
-        # inject bot into eventsub server
+        # attach bot
         eventsub_server.bot_instance = bot
 
-        # -------------------------------------------------
+        # ==================================================
         # COMMANDS
-        # -------------------------------------------------
+        # ==================================================
 
         register_live_commands(bot)
         await register_discounts(bot, session)
@@ -250,9 +229,9 @@ async def main():
         await register_utilities(bot)
         await register_help(bot)
 
-        # -------------------------------------------------
+        # ==================================================
         # TASKS
-        # -------------------------------------------------
+        # ==================================================
 
         free_task = asyncio.create_task(free_games_loop(session))
 
@@ -267,16 +246,9 @@ async def main():
 
         monitor_task = asyncio.create_task(monitor.start())
 
-        # -------------------------------------------------
-        # WEB SERVER
-        # -------------------------------------------------
-
         runner = await start_web_server(bot, app_state, monitor)
 
-        # -------------------------------------------------
-        # SIGNALS
-        # -------------------------------------------------
-
+        # signals
         loop = asyncio.get_running_loop()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -284,18 +256,11 @@ async def main():
 
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
 
-        # -------------------------------------------------
-        # WAIT
-        # -------------------------------------------------
-
         await shutdown_event.wait()
 
         logger.info("Shutdown signal received")
 
-        # -------------------------------------------------
-        # CLEANUP
-        # -------------------------------------------------
-
+        # cleanup
         for task in (free_task, monitor_task, bot_task):
             task.cancel()
 
@@ -318,10 +283,6 @@ async def main():
 
         logger.info("Shutdown complete")
 
-
-# ==================================================
-# ENTRY
-# ==================================================
 
 if __name__ == "__main__":
     asyncio.run(main())
