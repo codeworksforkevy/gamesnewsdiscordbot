@@ -26,21 +26,16 @@ if not DATABASE_URL:
 
 
 # ==================================================
-# LOGGING (Railway-safe JSON logs)
+# LOGGING
 # ==================================================
 
 class JsonFormatter(logging.Formatter):
     def format(self, record):
-        log_record = {
+        return json.dumps({
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
-        }
-
-        if hasattr(record, "extra_data"):
-            log_record.update(record.extra_data)
-
-        return json.dumps(log_record)
+        })
 
 
 handler = logging.StreamHandler()
@@ -55,7 +50,7 @@ logger = logging.getLogger("bot")
 
 
 # ==================================================
-# DISCORD BOT
+# BOT
 # ==================================================
 
 intents = discord.Intents.default()
@@ -71,11 +66,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 from services.db import Database
 from services.state import AppState
+from services.cache import CacheManager
+from services.fetch_router import FetchRouter
 
-from services.free_games_service import (
-    update_free_games_cache,
-    init_cache
-)
+from services.free_games_service import update_free_games_cache, init_cache
 
 from services.redis_client import RedisClient
 
@@ -89,6 +83,7 @@ from commands.twitch_badges import register as register_twitch_badges
 from commands.utilities.register import register_utilities
 from commands.help import register as register_help
 
+from services.webhook import create_webhook_app
 from services import eventsub_server
 
 
@@ -102,55 +97,43 @@ bot.logger = logger
 
 
 # ==================================================
-# READY EVENT
+# FREE GAME LOOP (WITH DEDUP)
 # ==================================================
 
-@bot.event
-async def on_ready():
-    logger.info(
-        "Bot ready",
-        extra={"extra_data": {"user": str(bot.user)}}
-    )
+async def free_games_loop(session, bot, cache):
 
-    try:
-        await startup_sync(bot)
-    except Exception as e:
-        logger.exception(
-            "Startup failed",
-            extra={"extra_data": {"error": str(e)}}
-        )
+    while True:
+        try:
+            key = "free_games"
 
-    try:
-        synced = await bot.tree.sync()
-        logger.info(
-            "Slash synced",
-            extra={"extra_data": {"count": len(synced)}}
-        )
-    except Exception as e:
-        logger.exception(
-            "Slash sync failed",
-            extra={"extra_data": {"error": str(e)}}
-        )
+            if await cache.is_duplicate(key):
+                logger.info("Duplicate fetch skipped")
+            else:
+                await update_free_games_cache(session, bot=bot, redis=cache)
+
+        except Exception as e:
+            logger.error(str(e))
+
+        await asyncio.sleep(1800)
 
 
 # ==================================================
 # WEB SERVER
 # ==================================================
 
-async def start_web_server(bot, app_state, monitor):
+async def start_web_server(bot, app_state):
+
+    webhook_app = await create_webhook_app(bot, app_state)
+    main_app = await eventsub_server.create_app(bot, app_state)
+
+    main_app.add_subapp("/webhook", webhook_app)
 
     async def health(_):
         return web.json_response({"status": "ok"})
 
-    async def metrics(_):
-        return web.Response(text="bot_up 1", content_type="text/plain")
+    main_app.router.add_get("/", health)
 
-    app = await eventsub_server.create_app(bot, app_state)
-
-    app.router.add_get("/", health)
-    app.router.add_get("/metrics", metrics)
-
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(main_app)
     await runner.setup()
 
     port = int(os.getenv("PORT", "8080"))
@@ -158,35 +141,7 @@ async def start_web_server(bot, app_state, monitor):
 
     await site.start()
 
-    logger.info(
-        "Web server started",
-        extra={"extra_data": {"port": port}}
-    )
-
     return runner
-
-
-# ==================================================
-# FREE GAMES LOOP (SAFE + RETRY READY)
-# ==================================================
-
-async def free_games_loop(session, bot, redis_client):
-
-    while True:
-        try:
-            await update_free_games_cache(
-                session,
-                bot=bot,
-                redis=redis_client
-            )
-
-        except Exception as e:
-            logger.error(
-                "Free games update failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
-
-        await asyncio.sleep(1800)
 
 
 # ==================================================
@@ -197,64 +152,42 @@ async def main():
 
     shutdown_event = asyncio.Event()
 
-    # -------------------------
     # DB
-    # -------------------------
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
 
-    logger.info("Database connected")
-
-    # -------------------------
-    # REDIS (SAFE INIT)
-    # -------------------------
+    # REDIS
+    cache = None
     redis_client = None
 
     if REDIS_URL:
         try:
             import redis.asyncio as redis
-
             raw = redis.from_url(REDIS_URL)
 
             redis_client = RedisClient(raw)
+            cache = CacheManager(raw)
 
-            # FIX: pass redis to cache init
             await init_cache(raw)
 
-            logger.info("Redis initialized")
+            logger.info("Redis enabled")
 
         except Exception as e:
-            logger.warning(
-                "Redis disabled (fallback to no-cache mode)",
-                extra={"extra_data": {"error": str(e)}}
-            )
-            redis_client = None
+            logger.warning(f"Redis fallback: {e}")
 
-    else:
-        logger.warning("Redis URL not provided, running without cache")
-
-    # -------------------------
-    # HTTP SESSION
-    # -------------------------
+    # HTTP
     timeout = ClientTimeout(total=15)
 
     async with ClientSession(timeout=timeout) as session:
 
-        # -------------------------
+        app_state.cache = cache
+
         # SERVICES
-        # -------------------------
         from services import twitch_api
-        from services.eventsub_manager import EventSubManager
-        from services.twitch_monitor import TwitchMonitor
-
         app_state.twitch_api = twitch_api.TwitchAPI(session)
-        app_state.eventsub_manager = EventSubManager(session)
 
-        # -------------------------
         # COMMANDS
-        # -------------------------
         register_live_commands(bot)
-
         await register_discounts(bot, session)
         await register_free_games(bot, session)
         await register_membership(bot, session)
@@ -262,27 +195,17 @@ async def main():
         await register_utilities(bot)
         await register_help(bot)
 
-        # -------------------------
-        # BACKGROUND TASKS
-        # -------------------------
+        # LOOP
         free_task = asyncio.create_task(
-            free_games_loop(session, bot, redis_client)
+            free_games_loop(session, bot, cache)
         )
 
-        monitor = TwitchMonitor(
-            bot=bot,
-            session=session,
-            redis=redis_client,
-            interval=180
-        )
+        # WEB
+        runner = await start_web_server(bot, app_state)
 
-        monitor.start()
+        bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
 
-        runner = await start_web_server(bot, app_state, monitor)
-
-        # -------------------------
-        # SIGNAL HANDLING (Railway friendly)
-        # -------------------------
+        # SIGNAL
         loop = asyncio.get_running_loop()
 
         def _shutdown():
@@ -292,53 +215,22 @@ async def main():
             try:
                 loop.add_signal_handler(sig, _shutdown)
             except NotImplementedError:
-                logger.warning("Signal handler not supported in this environment")
+                pass
 
-        # -------------------------
-        # START BOT
-        # -------------------------
-        bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
-
-        # -------------------------
-        # WAIT FOR SHUTDOWN
-        # -------------------------
         await shutdown_event.wait()
-
-        logger.info("Shutdown signal received")
-
-        # -------------------------
-        # CLEANUP
-        # -------------------------
-        monitor.stop()
 
         free_task.cancel()
         bot_task.cancel()
 
-        await asyncio.gather(
-            free_task,
-            bot_task,
-            return_exceptions=True
-        )
+        await asyncio.gather(free_task, bot_task, return_exceptions=True)
 
-        try:
-            await runner.cleanup()
-        except Exception:
-            pass
-
-        try:
-            await app_state.db.close()
-        except Exception:
-            pass
+        await runner.cleanup()
+        await app_state.db.close()
 
         logger.info("Shutdown complete")
 
 
-# ==================================================
 # ENTRY
-# ==================================================
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received, exiting...")
+    asyncio.run(main())
