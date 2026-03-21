@@ -1,5 +1,10 @@
+# services/gog.py
+
 import logging
-from aiohttp import ClientTimeout
+import json
+
+from services.http_utils import fetch_with_retry
+from services.metrics import inc
 
 logger = logging.getLogger("gog-service")
 
@@ -10,63 +15,63 @@ GOG_ENDPOINT = (
 
 
 # ==================================================
+# HELPERS
+# ==================================================
+
+def _safe_str(x):
+    return x.strip() if isinstance(x, str) else ""
+
+
+def _build_url(url):
+    if not url:
+        return "https://www.gog.com"
+
+    if url.startswith("http"):
+        return url
+
+    return f"https://www.gog.com{url}"
+
+
+def _build_image(img):
+    if not img:
+        return None
+
+    if img.startswith("http"):
+        return img
+
+    return f"https:{img}"
+
+
+# ==================================================
 # FETCH GOG FREE GAMES
 # ==================================================
 
-async def fetch_gog_free(session):
+async def fetch_gog_free(session, redis=None):
     """
-    Fetch free games from GOG.
-
-    Returns list of:
-        {
-            platform,
-            title,
-            url,
-            thumbnail
-        }
+    Production-grade GOG free games fetcher
     """
 
-    timeout = ClientTimeout(total=15)
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        ),
-        "Accept": "application/json"
-    }
+    logger.info("[GOG] fetch start")
 
     try:
-        async with session.get(
-            GOG_ENDPOINT,
-            timeout=timeout,
-            headers=headers
-        ) as resp:
-
-            if resp.status != 200:
-                logger.warning(
-                    "GOG non-200 response",
-                    extra={"extra_data": {"status": resp.status}}
-                )
-                return []
-
-            content_type = resp.headers.get("Content-Type", "")
-
-            if "application/json" not in content_type:
-                logger.warning(
-                    "GOG returned non-JSON response",
-                    extra={"extra_data": {"content_type": content_type}}
-                )
-                return []
-
-            data = await resp.json()
+        text = await fetch_with_retry(session, GOG_ENDPOINT)
+        inc("gog_fetch_success")
 
     except Exception as e:
+        inc("gog_fetch_fail")
+
         logger.warning(
             "GOG fetch failed",
             extra={"extra_data": {"error": str(e)}}
         )
+        return []
+
+    logger.info(f"[GOG] response size: {len(text)}")
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        logger.warning("GOG JSON decode failed")
         return []
 
     products = data.get("products")
@@ -78,27 +83,56 @@ async def fetch_gog_free(session):
     offers = []
 
     for item in products:
+        try:
+            price_data = item.get("price", {})
 
-        price_data = item.get("price", {})
-        is_free = price_data.get("isFree")
+            # -------------------------
+            # FREE FILTER
+            # -------------------------
+            is_free = (
+                price_data.get("isFree")
+                or price_data.get("finalAmount") == "0.00"
+            )
 
-        if not is_free:
+            if not is_free:
+                continue
+
+            title = _safe_str(item.get("title")) or "Unknown Title"
+
+            if not title:
+                continue
+
+            game = {
+                "id": f"gog-{item.get('id') or title}",
+                "title": title,
+                "platform": "GOG",
+                "url": _build_url(item.get("url")),
+                "thumbnail": _build_image(item.get("image")),
+            }
+
+            offers.append(game)
+
+        except Exception as e:
+            logger.warning(
+                "GOG item parse failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
             continue
 
-        url = item.get("url")
-        if url and not url.startswith("http"):
-            url = f"https://www.gog.com{url}"
+    # -------------------------
+    # DEDUP
+    # -------------------------
+    unique = {}
+    for g in offers:
+        key = f"{g['platform']}-{g['title']}"
+        unique[key] = g
 
-        thumbnail = item.get("image")
-        if thumbnail and not thumbnail.startswith("http"):
-            thumbnail = f"https:{thumbnail}"
+    offers = list(unique.values())
 
-        offers.append({
-            "platform": "GOG",
-            "title": item.get("title", "Unknown Title"),
-            "url": url,
-            "thumbnail": thumbnail
-        })
+    # -------------------------
+    # METRICS
+    # -------------------------
+    inc("gog_games_found", len(offers))
 
     logger.info(
         "GOG games fetched",
