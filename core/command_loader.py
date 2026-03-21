@@ -3,42 +3,32 @@ import pkgutil
 import inspect
 import logging
 
-logger = logging.getLogger("command-loader")
+logger = logging.getLogger("loader")
 
 
-# ==================================================
-# AUTO COMMAND LOADER
-# ==================================================
-async def load_commands(bot, app_state=None):
-    """
-    Automatically discovers and registers all commands.
-    """
-
+async def load_commands(bot, app_state):
     from commands import __path__ as commands_path
 
     for _, module_name, _ in pkgutil.iter_modules(commands_path):
-        full_module_name = f"commands.{module_name}"
+        full_name = f"commands.{module_name}"
 
         try:
-            module = importlib.import_module(full_module_name)
+            module = importlib.import_module(full_name)
 
-            # -------------------------------------------------
-            # FIND REGISTER FUNCTION
-            # -------------------------------------------------
             register_fn = getattr(module, "register", None)
 
             if not register_fn:
                 continue
 
-            # -------------------------------------------------
-            # CALL REGISTER (ASYNC / SYNC SAFE)
-            # -------------------------------------------------
             if inspect.iscoroutinefunction(register_fn):
                 await register_fn(bot, app_state)
             else:
                 register_fn(bot, app_state)
 
-            logger.info(f"Loaded command module: {module_name}")
+            app_state.registry.register(module_name, full_name)
+
+            logger.info(f"Loaded: {module_name}")
 
         except Exception as e:
-            logger.exception(f"Failed to load {module_name}: {e}")
+            app_state.registry.register_error(full_name, e)
+            logger.exception(f"Failed: {module_name}")
