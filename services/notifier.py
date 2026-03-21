@@ -1,49 +1,41 @@
 # services/notifier.py
 
 import logging
-import discord
 
 logger = logging.getLogger("notifier")
 
 
-async def notify_new_games(bot, games):
+async def notify_discord(bot, games):
+    """
+    Sends new games to Discord channels
+    """
 
     if not games:
         return
 
-    # TODO: config'den alınabilir
-    channel_id = None
+    # TODO: kanal ID'leri config/DB'den alınmalı
+    channel_id = int(bot.app_state.default_channel_id)
 
-    # fallback: ilk guild'in ilk text channel'ı
-    channel = None
-
-    for guild in bot.guilds:
-        for ch in guild.text_channels:
-            channel = ch
-            break
-        if channel:
-            break
+    channel = bot.get_channel(channel_id)
 
     if not channel:
-        logger.warning("No channel found for notifications")
+        logger.warning("Notify channel not found")
         return
 
     for game in games:
-        try:
-            embed = discord.Embed(
-                title=game.get("title"),
-                url=game.get("url"),
-                description=f"🎮 Free on {game.get('platform')}",
-                color=0x00ff99
-            )
 
-            if game.get("thumbnail"):
-                embed.set_image(url=game["thumbnail"])
+        embed = {
+            "title": game["title"],
+            "url": game.get("url"),
+            "description": f"Free on {game['platform']}",
+        }
 
-            await channel.send(embed=embed)
+        if game.get("thumbnail"):
+            embed["image"] = {"url": game["thumbnail"]}
 
-        except Exception as e:
-            logger.warning(
-                "Notify failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
+        await channel.send(embed=discord.Embed(**embed))
+
+    logger.info(
+        "Games notified",
+        extra={"extra_data": {"count": len(games)}}
+    )
