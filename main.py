@@ -140,7 +140,10 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
         )
 
     app = await eventsub_server.create_app(bot, app_state)
-    app.state.bot = bot
+
+    # ✅ FIX (aiohttp pattern)
+    app["bot"] = bot
+    app["app_state"] = app_state
 
     app.router.add_get("/", health)
     app.router.add_get("/metrics", metrics)
@@ -153,7 +156,11 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
 
     await site.start()
 
-    logger.info("Web server started", extra={"extra_data": {"port": port}})
+    logger.info(
+        "Web server started",
+        extra={"extra_data": {"port": port}}
+    )
+
     return runner
 
 
@@ -166,7 +173,10 @@ async def free_games_loop(session):
         try:
             await update_free_games_cache(session)
         except Exception as e:
-            logger.error("Free games failed", extra={"extra_data": {"error": str(e)}})
+            logger.error(
+                "Free games failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
 
         await asyncio.sleep(1800)
 
@@ -202,10 +212,13 @@ async def main():
             db=app_state.db
         )
 
-        # attach bot
+        # attach bot (legacy support)
         eventsub_server.bot_instance = bot
 
+        # ==================================================
         # COMMANDS
+        # ==================================================
+
         register_live_commands(bot)
         await register_discounts(bot, session)
         await register_free_games(bot, session)
@@ -214,7 +227,10 @@ async def main():
         await register_utilities(bot)
         await register_help(bot)
 
+        # ==================================================
         # TASKS
+        # ==================================================
+
         free_task = asyncio.create_task(free_games_loop(session))
 
         from services.monitor import TwitchMonitor
@@ -230,10 +246,18 @@ async def main():
 
         runner = await start_web_server(bot, app_state, monitor)
 
-        # signals
+        # ==================================================
+        # SIGNALS (Docker-safe)
+        # ==================================================
+
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, shutdown_event.set)
+
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, shutdown_event.set)
+        except NotImplementedError:
+            # Windows / some environments
+            logger.warning("Signal handlers not supported")
 
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
 
@@ -241,7 +265,10 @@ async def main():
 
         logger.info("Shutdown signal received")
 
-        # cleanup
+        # ==================================================
+        # CLEANUP
+        # ==================================================
+
         for task in (free_task, monitor_task, bot_task):
             task.cancel()
 
@@ -264,6 +291,10 @@ async def main():
 
         logger.info("Shutdown complete")
 
+
+# ==================================================
+# ENTRY
+# ==================================================
 
 if __name__ == "__main__":
     asyncio.run(main())
