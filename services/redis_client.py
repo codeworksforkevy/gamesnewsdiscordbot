@@ -1,12 +1,10 @@
-import os
-import redis.asyncio as redis
+class RedisClient:
 
-REDIS_URL = os.getenv("REDIS_URL")
+    def __init__(self, redis):
+        self.redis = redis
 
-if not REDIS_URL:
-    raise RuntimeError("REDIS_URL is missing")
+    async def get(self, key):
+        return await self.redis.get(key)
 
-redis_client = redis.from_url(
-    REDIS_URL,
-    decode_responses=True
-)
+    async def set(self, key, value, ttl=300):
+        await self.redis.set(key, value, ex=ttl)
