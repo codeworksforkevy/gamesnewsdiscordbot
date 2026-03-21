@@ -1,7 +1,6 @@
+import redis.asyncio as redis
 import os
-import aioredis
 
-redis = aioredis.from_url(
-    os.getenv("REDIS_URL"),
-    decode_responses=True
-)
+REDIS_URL = os.getenv("REDIS_URL")
+
+redis = redis.from_url(REDIS_URL, decode_responses=True)
