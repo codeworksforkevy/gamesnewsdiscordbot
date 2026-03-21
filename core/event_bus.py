@@ -1,67 +1,27 @@
-import asyncio
-import logging
-from collections import defaultdict
+# core/event_bus.py
 
-logger = logging.getLogger("event-bus")
+import asyncio
+from collections import defaultdict
+from typing import Callable, Any
 
 
 class EventBus:
-    """
-    Simple async event bus
-    """
-
     def __init__(self):
-        self._handlers = defaultdict(list)
-        self._lock = asyncio.Lock()
+        self._listeners = defaultdict(list)
 
-    # =========================
-    # SUBSCRIBE
-    # =========================
-    async def subscribe(self, event_name: str, handler):
-        async with self._lock:
-            self._handlers[event_name].append(handler)
+    def subscribe(self, event_name: str, handler: Callable):
+        self._listeners[event_name].append(handler)
 
-        logger.info(
-            "Handler subscribed",
-            extra={"event": event_name, "handler": handler.__name__}
-        )
-
-    # =========================
-    # PUBLISH
-    # =========================
-    async def publish(self, event_name: str, data=None):
-        handlers = []
-
-        async with self._lock:
-            handlers = list(self._handlers.get(event_name, []))
-
-        if not handlers:
-            logger.debug(f"No handlers for event: {event_name}")
-            return
+    async def emit(self, event_name: str, *args, **kwargs):
+        handlers = self._listeners.get(event_name, [])
 
         tasks = []
-
         for handler in handlers:
-            tasks.append(self._safe_execute(handler, event_name, data))
+            tasks.append(asyncio.create_task(handler(*args, **kwargs)))
 
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    # =========================
-    # SAFE EXECUTION
-    # =========================
-    async def _safe_execute(self, handler, event_name, data):
-        try:
-            await handler(data)
-        except Exception as e:
-            logger.error(
-                "Event handler failed",
-                extra={
-                    "event": event_name,
-                    "handler": handler.__name__,
-                    "error": str(e)
-                }
-            )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
-# Singleton instance
+# global bus
 event_bus = EventBus()
