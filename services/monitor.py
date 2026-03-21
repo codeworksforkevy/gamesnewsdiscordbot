@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 class TwitchMonitor:
 
     LEADER_LOCK_ID = 987654321
+    LEADER_REDIS_KEY = "twitch-monitor:leader"
 
     def __init__(
         self,
@@ -15,6 +16,8 @@ class TwitchMonitor:
         redis,
         notifier=None,
         metadata_cache=None,
+        cooldown_manager=None,
+        change_classifier=None,
         telemetry=None,
         interval=180
     ):
@@ -22,8 +25,12 @@ class TwitchMonitor:
         self.eventsub_manager = eventsub_manager
         self.db_pool = db_pool
         self.redis = redis
+
         self.notifier = notifier
         self.metadata_cache = metadata_cache
+        self.cooldown_manager = cooldown_manager
+        self.change_classifier = change_classifier
+
         self.telemetry = telemetry
         self.interval = interval
 
@@ -34,16 +41,30 @@ class TwitchMonitor:
         self.monitor_cycle_failures = 0
 
     # ==================================================
-    # LEADER LOCK
+    # LEADER LOCK (REDIS + DB FALLBACK)
     # ==================================================
 
     async def acquire_leader_lock(self):
+
         try:
+            # Redis lock (multi-instance)
+            if self.redis:
+                ok = await self.redis.set(
+                    self.LEADER_REDIS_KEY,
+                    "1",
+                    nx=True,
+                    ex=60
+                )
+                if ok:
+                    return True
+
+            # DB fallback
             async with self.db_pool.acquire() as conn:
                 return await conn.fetchval(
                     "SELECT pg_try_advisory_lock($1);",
                     self.LEADER_LOCK_ID
                 )
+
         except Exception:
             self.logger.exception("Leader lock failed")
             return False
@@ -58,7 +79,7 @@ class TwitchMonitor:
             return
 
         if not await self.acquire_leader_lock():
-            self.logger.info("Not leader — skipping monitor")
+            self.logger.info("Not leader — monitor disabled.")
             return
 
         self._running = True
@@ -178,7 +199,7 @@ class TwitchMonitor:
             self.logger.exception("Live reconciliation failed")
 
     # ==================================================
-    # 🔥 STREAM TRACKING (CORE)
+    # 🔥 STREAM TRACKING (FULL PIPELINE)
     # ==================================================
 
     async def track_stream_changes(self):
@@ -192,6 +213,7 @@ class TwitchMonitor:
                 """)
 
             for row in rows:
+
                 bid = row["broadcaster_id"]
 
                 current = await self.twitch_api.get_stream_metadata(bid)
@@ -200,20 +222,45 @@ class TwitchMonitor:
 
                 prev = await self.metadata_cache.get(bid)
 
+                # First time cache
                 if not prev:
                     await self.metadata_cache.set(bid, current)
                     continue
 
-                if self._has_changed(prev, current):
-                    await self.metadata_cache.set(bid, current)
+                # No change
+                if not self._has_changed(prev, current):
+                    continue
 
-                    await self.notify_stream_change(bid, prev, current)
+                # 🔥 classify change
+                change_type = (
+                    self.change_classifier.classify(prev, current)
+                    if self.change_classifier else "unknown"
+                )
+
+                # 🔥 cooldown check
+                if self.cooldown_manager:
+                    if not self.cooldown_manager.should_send(
+                        f"{bid}:{change_type}",
+                        cooldown=300
+                    ):
+                        continue
+
+                # update cache
+                await self.metadata_cache.set(bid, current)
+
+                # notify
+                await self.notify_stream_change(
+                    bid,
+                    prev,
+                    current,
+                    change_type
+                )
 
         except Exception:
             self.logger.exception("Stream tracking failed")
 
     # ==================================================
-    # DIFF LOGIC
+    # DIFF
     # ==================================================
 
     def _has_changed(self, old, new):
@@ -227,14 +274,15 @@ class TwitchMonitor:
     # NOTIFICATION
     # ==================================================
 
-    async def notify_stream_change(self, broadcaster_id, old, new):
+    async def notify_stream_change(self, broadcaster_id, old, new, change_type):
 
         self.logger.info(
             "Stream changed",
             extra={"extra_data": {
                 "broadcaster": broadcaster_id,
                 "old": old,
-                "new": new
+                "new": new,
+                "type": change_type
             }}
         )
 
@@ -242,7 +290,8 @@ class TwitchMonitor:
             await self.notifier.stream_updated(
                 broadcaster_id,
                 old,
-                new
+                new,
+                change_type
             )
 
     # ==================================================
