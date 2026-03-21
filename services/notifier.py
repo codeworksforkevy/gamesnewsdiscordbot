@@ -1,52 +1,49 @@
+# services/notifier.py
+
+import logging
 import discord
-from datetime import datetime, timezone
+
+logger = logging.getLogger("notifier")
 
 
-class Notifier:
+async def notify_new_games(bot, games):
 
-    def __init__(self, bot):
-        self.bot = bot
+    if not games:
+        return
 
-    # ==================================================
-    # MAIN ENTRY
-    # ==================================================
+    # TODO: config'den alınabilir
+    channel_id = None
 
-    async def stream_updated(self, broadcaster_id, old, new, change_type=None):
+    # fallback: ilk guild'in ilk text channel'ı
+    channel = None
 
-        channel = self.bot.get_channel(YOUR_CHANNEL_ID)
+    for guild in bot.guilds:
+        for ch in guild.text_channels:
+            channel = ch
+            break
+        if channel:
+            break
 
-        embed = self.build_embed(old, new, change_type)
+    if not channel:
+        logger.warning("No channel found for notifications")
+        return
 
-        await channel.send(embed=embed)
+    for game in games:
+        try:
+            embed = discord.Embed(
+                title=game.get("title"),
+                url=game.get("url"),
+                description=f"🎮 Free on {game.get('platform')}",
+                color=0x00ff99
+            )
 
-    # ==================================================
-    # EMBED UX
-    # ==================================================
+            if game.get("thumbnail"):
+                embed.set_image(url=game["thumbnail"])
 
-    def build_embed(self, old, new, change_type):
+            await channel.send(embed=embed)
 
-        embed = discord.Embed(
-            title="🔴 Stream Update",
-            color=discord.Color.blurple(),
-            timestamp=datetime.now(timezone.utc)
-        )
-
-        embed.add_field(
-            name="💽 Title",
-            value=f"`{old.get('title')} → {new.get('title')}`",
-            inline=False
-        )
-
-        embed.add_field(
-            name="🕹️ Game",
-            value=f"`{old.get('game')} → {new.get('game')}`",
-            inline=False
-        )
-
-        embed.add_field(
-            name="👩‍💻 Change Type",
-            value=change_type or "unknown",
-            inline=False
-        )
-
-        return embed
+        except Exception as e:
+            logger.warning(
+                "Notify failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
