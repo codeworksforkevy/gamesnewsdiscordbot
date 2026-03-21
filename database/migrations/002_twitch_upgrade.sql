@@ -1,0 +1,18 @@
+-- STREAMERS TABLE UPGRADE
+
+ALTER TABLE streamers
+ADD COLUMN IF NOT EXISTS role_id BIGINT,
+ADD COLUMN IF NOT EXISTS last_title TEXT,
+ADD COLUMN IF NOT EXISTS last_game TEXT,
+ADD COLUMN IF NOT EXISTS message_id BIGINT;
+
+
+-- GUILD CONFIG TABLE
+
+CREATE TABLE IF NOT EXISTS guild_config (
+    guild_id BIGINT PRIMARY KEY,
+    default_channel_id BIGINT,
+    default_role_id BIGINT,
+    language TEXT DEFAULT 'EN',
+    ping_enabled BOOLEAN DEFAULT TRUE
+);
