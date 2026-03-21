@@ -50,7 +50,7 @@ root_logger.setLevel(logging.INFO)
 root_logger.handlers.clear()
 root_logger.addHandler(handler)
 
-logger = logging.getLogger("find-a-curie")
+logger = logging.getLogger("bot")
 
 
 # ==================================================
@@ -60,27 +60,25 @@ logger = logging.getLogger("find-a-curie")
 intents = discord.Intents.default()
 intents.message_content = False
 intents.guilds = True
-intents.members = True  # 🔥 role system için gerekli
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 # ==================================================
-# IMPORTS
+# IMPORTS (LAZY SAFE)
 # ==================================================
 
 from services.db import Database
 from services.state import AppState
 from services.eventsub_server import create_eventsub_app
-from services.twitch_api import TwitchAPI
-from services.eventsub_manager import EventSubManager
 
 from services.free_games_service import (
     update_free_games_cache,
     init_cache
 )
 
-from startup import startup_sync  # 🔥 EKLENDİ
+from startup import startup_sync
 
 from commands.live_commands import register_live_commands
 from commands.discounts import register as register_discounts
@@ -90,7 +88,6 @@ from commands.twitch_badges import register as register_twitch_badges
 from commands.utilities.register import register_utilities
 from commands.help import register as register_help
 
-# EventSub server
 from services import eventsub_server
 
 
@@ -109,54 +106,53 @@ bot.logger = logger
 
 @bot.event
 async def on_ready():
+
     logger.info(
         "Bot ready",
         extra={"extra_data": {"user": str(bot.user)}}
     )
 
-    # 🔥 STARTUP SYNC (CRITICAL)
+    # 🔥 startup sync
     try:
         await startup_sync(bot)
     except Exception as e:
-        logger.exception(f"Startup sync failed: {e}")
+        logger.exception(f"Startup failed: {e}")
 
+    # slash sync
     try:
         synced = await bot.tree.sync()
         logger.info(
-            "Slash sync complete",
+            "Slash commands synced",
             extra={"extra_data": {"count": len(synced)}}
         )
     except Exception as e:
-        logger.exception(
-            "Slash sync failed",
-            extra={"extra_data": {"error": str(e)}}
-        )
+        logger.exception(f"Slash sync failed: {e}")
 
 
 # ==================================================
 # WEB SERVER
 # ==================================================
 
-async def start_web_server(bot, app_state: AppState, monitor):
+async def start_web_server(bot, app_state, monitor):
 
-    async def health(request):
+    async def health(_):
         return web.json_response({"status": "ok"})
 
-    async def metrics(request):
+    async def metrics(_):
+
         m = monitor.get_metrics()
 
-        payload = f"""
+        return web.Response(
+            text=f"""
 monitor_cycles_total {m['monitor_cycles_total']}
 monitor_cycle_failures {m['monitor_cycle_failures']}
-"""
-        return web.Response(
-            text=payload.strip(),
+""".strip(),
             content_type="text/plain"
         )
 
     app = await create_eventsub_app(bot, app_state)
 
-    # inject bot (CRITICAL)
+    # attach bot
     app.state.bot = bot
 
     app.router.add_get("/", health)
@@ -166,13 +162,16 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
     await runner.setup()
 
     port = int(os.getenv("PORT", "8080"))
-    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+
+    site = web.TCPSite(
+        runner,
+        host="0.0.0.0",
+        port=port
+    )
+
     await site.start()
 
-    logger.info(
-        "Web server started",
-        extra={"extra_data": {"port": port}}
-    )
+    logger.info("Web server started", extra={"extra_data": {"port": port}})
 
     return runner
 
@@ -204,7 +203,7 @@ async def main():
     shutdown_event = asyncio.Event()
 
     # -------------------------------------------------
-    # DATABASE
+    # DB
     # -------------------------------------------------
 
     app_state.db = Database(DATABASE_URL)
@@ -219,16 +218,24 @@ async def main():
     await init_cache()
 
     # -------------------------------------------------
-    # HTTP SESSION
+    # SESSION
     # -------------------------------------------------
 
     async with ClientSession() as session:
 
-        # Core services
-        app_state.twitch_api = TwitchAPI(session)
+        # -------------------------------------------------
+        # INIT SERVICES (IMPORTANT)
+        # -------------------------------------------------
+
+        from services.twitch_api import init_twitch_api
+
+        app_state.twitch_api = await init_twitch_api()
+
+        from services.eventsub_manager import EventSubManager
+
         app_state.eventsub_manager = EventSubManager(session)
 
-        # 🔥 Bot injection for EventSub server
+        # inject bot into eventsub server
         eventsub_server.bot_instance = bot
 
         # -------------------------------------------------
@@ -244,16 +251,10 @@ async def main():
         await register_help(bot)
 
         # -------------------------------------------------
-        # BACKGROUND TASKS
+        # TASKS
         # -------------------------------------------------
 
-        free_task = asyncio.create_task(
-            free_games_loop(session)
-        )
-
-        # -------------------------------------------------
-        # MONITOR
-        # -------------------------------------------------
+        free_task = asyncio.create_task(free_games_loop(session))
 
         from services.monitor import TwitchMonitor
 
@@ -264,32 +265,24 @@ async def main():
             interval=180
         )
 
-        monitor_task = asyncio.create_task(
-            monitor.start()
-        )
+        monitor_task = asyncio.create_task(monitor.start())
 
         # -------------------------------------------------
         # WEB SERVER
         # -------------------------------------------------
 
-        runner = await start_web_server(
-            bot,
-            app_state,
-            monitor
-        )
+        runner = await start_web_server(bot, app_state, monitor)
 
         # -------------------------------------------------
-        # SIGNAL HANDLING
+        # SIGNALS
         # -------------------------------------------------
 
         loop = asyncio.get_running_loop()
 
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, shutdown_event.set)
 
-        bot_task = asyncio.create_task(
-            bot.start(DISCORD_TOKEN)
-        )
+        bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
 
         # -------------------------------------------------
         # WAIT
