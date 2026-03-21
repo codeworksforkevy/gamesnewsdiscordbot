@@ -1,8 +1,27 @@
 import logging
 import asyncio
+import json
+import hashlib
 import discord
 
 logger = logging.getLogger("notifier")
+
+CACHE_KEY = "notified_games_hash"
+
+_memory_last_hash = None
+
+
+# ==================================================
+# HASHING (DEDUP SYSTEM)
+# ==================================================
+
+def hash_games(games):
+    try:
+        return hashlib.sha256(
+            json.dumps(games, sort_keys=True).encode()
+        ).hexdigest()
+    except Exception:
+        return None
 
 
 # ==================================================
@@ -23,7 +42,7 @@ async def retry_async(func, retries=3, delay=2):
 
 
 # ==================================================
-# EMBED BUILDER (UX IMPROVED)
+# EMBED BUILDER (UX)
 # ==================================================
 
 def build_embed(game):
@@ -37,7 +56,6 @@ def build_embed(game):
     if game.get("thumbnail"):
         embed.set_image(url=game["thumbnail"])
 
-    # Optional fields
     if game.get("expires"):
         embed.add_field(
             name="⏳ Expires",
@@ -58,16 +76,68 @@ def build_embed(game):
 
 
 # ==================================================
-# MAIN NOTIFIER (SAFE + UX + RETRY)
+# GROUP BY PLATFORM (UX)
 # ==================================================
 
-async def notify_discord(bot, games):
+def group_by_platform(games):
+    grouped = {}
+
+    for game in games:
+        platform = game.get("platform", "Unknown")
+
+        if platform not in grouped:
+            grouped[platform] = []
+
+        grouped[platform].append(game)
+
+    return grouped
+
+
+# ==================================================
+# MAIN NOTIFIER
+# ==================================================
+
+async def notify_discord(bot, games, redis=None):
 
     if not games:
         return
 
+    global _memory_last_hash
+
     # -------------------------
-    # CHANNEL FETCH
+    # DEDUP CHECK
+    # -------------------------
+    current_hash = hash_games(games)
+
+    if not current_hash:
+        logger.warning("Hash generation failed")
+        return
+
+    # Redis check
+    if redis:
+        try:
+            last_hash = await redis.get(CACHE_KEY)
+
+            if isinstance(last_hash, bytes):
+                last_hash = last_hash.decode()
+
+            if last_hash == current_hash:
+                logger.info("Duplicate notification skipped (Redis)")
+                return
+
+        except Exception as e:
+            logger.warning(
+                "Redis hash check failed",
+                extra={"extra_data": {"error": str(e)}}
+            )
+
+    # Memory fallback
+    if _memory_last_hash == current_hash:
+        logger.info("Duplicate notification skipped (Memory)")
+        return
+
+    # -------------------------
+    # CHANNEL
     # -------------------------
     try:
         channel_id = int(bot.app_state.default_channel_id)
@@ -81,8 +151,6 @@ async def notify_discord(bot, games):
     channel = bot.get_channel(channel_id)
 
     if not channel:
-        logger.warning("Notify channel not found in cache, trying fetch...")
-
         try:
             channel = await bot.fetch_channel(channel_id)
         except Exception as e:
@@ -93,33 +161,67 @@ async def notify_discord(bot, games):
             return
 
     # -------------------------
-    # SEND IN BATCH (UX IMPROVEMENT)
+    # GROUP UX
     # -------------------------
-    embeds = []
-
-    for game in games:
-        try:
-            embeds.append(build_embed(game))
-        except Exception as e:
-            logger.warning(
-                "Embed build failed",
-                extra={"extra_data": {"error": str(e), "game": game}}
-            )
-
-    # Discord limits: max 10 embeds per message
-    chunks = [embeds[i:i + 10] for i in range(0, len(embeds), 10)]
-
-    for chunk in chunks:
-        try:
-            await retry_async(lambda: channel.send(embeds=chunk))
-        except Exception as e:
-            logger.exception(
-                "Discord send failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
+    grouped = group_by_platform(games)
 
     # -------------------------
-    # LOGGING
+    # SEND MESSAGE PER PLATFORM
+    # -------------------------
+    for platform, items in grouped.items():
+
+        embeds = []
+
+        for game in items:
+            try:
+                embeds.append(build_embed(game))
+            except Exception as e:
+                logger.warning(
+                    "Embed build failed",
+                    extra={"extra_data": {"error": str(e)}}
+                )
+
+        chunks = [embeds[i:i + 10] for i in range(0, len(embeds), 10)]
+
+        for chunk in chunks:
+            try:
+                await retry_async(lambda: channel.send(embeds=chunk))
+            except Exception as e:
+                logger.exception(
+                    "Send failed",
+                    extra={"extra_data": {"error": str(e)}}
+                )
+
+    # -------------------------
+    # SUMMARY MESSAGE (UX BOOST)
+    # -------------------------
+    try:
+        summary = f"🔥 **{len(games)} New Free Games Available!**"
+
+        await retry_async(lambda: channel.send(summary))
+    except Exception as e:
+        logger.warning(
+            "Summary send failed",
+            extra={"extra_data": {"error": str(e)}}
+        )
+
+    # -------------------------
+    # SAVE HASH
+    # -------------------------
+    try:
+        if redis:
+            await redis.set(CACHE_KEY, current_hash)
+        else:
+            _memory_last_hash = current_hash
+
+    except Exception as e:
+        logger.warning(
+            "Hash save failed",
+            extra={"extra_data": {"error": str(e)}}
+        )
+
+    # -------------------------
+    # LOG
     # -------------------------
     logger.info(
         "Games notified",
