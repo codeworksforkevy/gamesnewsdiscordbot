@@ -5,49 +5,41 @@ import hashlib
 import discord
 
 from core.event_bus import event_bus
-from core.state_manager import state_manager
+from db.guild_settings import get_guild_config
 
 logger = logging.getLogger("notifier")
-
-CACHE_KEY = "notified_games_hash"
 
 _memory_last_hash = None
 
 
-# ==================================================
-# HASH (DEDUP)
-# ==================================================
+# =================================================
+# HASH
+# =================================================
 def hash_games(games):
-    try:
-        return hashlib.sha256(
-            json.dumps(games, sort_keys=True).encode()
-        ).hexdigest()
-    except Exception:
-        return None
+    return hashlib.sha256(
+        json.dumps(games, sort_keys=True).encode()
+    ).hexdigest()
 
 
-# ==================================================
-# RETRY (ROBUST)
-# ==================================================
-async def retry_async(func, retries=3, base_delay=1):
-    last_error = None
-
+# =================================================
+# RETRY
+# =================================================
+async def retry_async(func, retries=3, delay=2):
     for attempt in range(retries):
         try:
             return await func()
         except Exception as e:
-            last_error = e
-            await asyncio.sleep(base_delay * (2 ** attempt))
+            await asyncio.sleep(delay * (2 ** attempt))
 
-    raise last_error
+    raise RuntimeError("Max retries exceeded")
 
 
-# ==================================================
-# EMBED BUILDER (UX ENHANCED)
-# ==================================================
+# =================================================
+# EMBED
+# =================================================
 def build_embed(game):
     embed = discord.Embed(
-        title=game.get("title", "Unknown Game"),
+        title=game.get("title", "Unknown"),
         url=game.get("url"),
         description=f"🎮 Free on **{game.get('platform', 'Unknown')}**",
         color=0x2ecc71
@@ -56,189 +48,65 @@ def build_embed(game):
     if game.get("thumbnail"):
         embed.set_image(url=game["thumbnail"])
 
-    if game.get("end_date"):
-        embed.add_field(
-            name="⏳ Expires",
-            value=str(game["end_date"]),
-            inline=True
-        )
-
-    embed.set_footer(text="Curie Free Games Bot")
-
     return embed
 
 
-# ==================================================
-# GROUP BY PLATFORM (UX)
-# ==================================================
-def group_by_platform(games):
-    grouped = {}
-
-    for game in games:
-        platform = game.get("platform", "Unknown")
-        grouped.setdefault(platform, []).append(game)
-
-    return grouped
-
-
-# ==================================================
-# SAFE CHANNEL RESOLVE (MULTI-GUILD)
-# ==================================================
-async def resolve_channel(bot, guild_id: int):
-    try:
-        state = await state_manager.get_guild_state(guild_id)
-
-        if not state:
-            return None
-
-        channel_id = state.get("channel_id")
-
-        if not channel_id:
-            return None
-
-        channel = bot.get_channel(channel_id)
-
-        if channel:
-            return channel
-
-        return await bot.fetch_channel(channel_id)
-
-    except Exception as e:
-        logger.warning(
-            "Channel resolve failed",
-            extra={"guild_id": guild_id, "error": str(e)}
-        )
-        return None
-
-
-# ==================================================
-# CORE NOTIFIER (EVENT HANDLER)
-# ==================================================
-async def handle_new_games(data):
-    """
-    Event-driven handler:
-    triggered by event_bus.publish("new_games", games)
-    """
-
-    bot = data.get("bot")
-    games = data.get("games")
-    redis = data.get("redis")
-
-    if not bot or not games:
-        return
+# =================================================
+# EVENT HANDLER
+# =================================================
+async def handle_free_games(bot, games):
 
     global _memory_last_hash
 
-    # -------------------------
-    # DEDUP
-    # -------------------------
+    if not games:
+        return
+
     current_hash = hash_games(games)
 
-    if not current_hash:
-        logger.warning("Hash generation failed")
+    if current_hash == _memory_last_hash:
+        logger.info("Duplicate skipped")
         return
 
-    # Redis check
-    if redis:
-        try:
-            last_hash = await redis.get(CACHE_KEY)
+    _memory_last_hash = current_hash
 
-            if isinstance(last_hash, bytes):
-                last_hash = last_hash.decode()
+    # group embeds
+    embeds = [build_embed(g) for g in games]
 
-            if last_hash == current_hash:
-                logger.info("Duplicate skipped (Redis)")
-                return
+    # send per guild config (DB DRIVEN)
+    for guild in bot.guilds:
 
-        except Exception as e:
-            logger.warning(f"Redis check failed: {e}")
+        config = await get_guild_config(guild.id)
 
-    # Memory check
-    if _memory_last_hash == current_hash:
-        logger.info("Duplicate skipped (Memory)")
-        return
+        if not config:
+            continue
 
-    # -------------------------
-    # GROUP UX
-    # -------------------------
-    grouped = group_by_platform(games)
+        channel_id = config.get("announce_channel_id")
 
-    # -------------------------
-    # GET ALL GUILDS
-    # -------------------------
-    guilds = bot.guilds
+        if not channel_id:
+            continue
 
-    tasks = []
-
-    for guild in guilds:
-        tasks.append(process_guild(bot, guild, grouped))
-
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-    # -------------------------
-    # SAVE HASH
-    # -------------------------
-    try:
-        if redis:
-            await redis.set(CACHE_KEY, current_hash)
-        else:
-            _memory_last_hash = current_hash
-    except Exception as e:
-        logger.warning(f"Hash save failed: {e}")
-
-    logger.info(
-        "Games notified",
-        extra={"count": len(games), "guilds": len(guilds)}
-    )
-
-
-# ==================================================
-# PER GUILD PROCESSING
-# ==================================================
-async def process_guild(bot, guild, grouped):
-
-    try:
-        channel = await resolve_channel(bot, guild.id)
+        channel = guild.get_channel(channel_id)
 
         if not channel:
-            logger.warning(f"No channel for guild {guild.id}")
-            return
+            continue
 
-        # -------------------------
-        # SEND PER PLATFORM
-        # -------------------------
-        for platform, games in grouped.items():
-
-            embeds = []
-
-            for game in games:
-                try:
-                    embeds.append(build_embed(game))
-                except Exception as e:
-                    logger.warning(f"Embed error: {e}")
-
-            # chunk
+        try:
+            # chunk send
             for i in range(0, len(embeds), 10):
-                chunk = embeds[i:i + 10]
+                await retry_async(lambda: channel.send(embeds=embeds[i:i+10]))
 
-                await retry_async(lambda: channel.send(embeds=chunk))
+            await retry_async(lambda: channel.send(f"🔥 {len(games)} new free games!"))
 
-        # -------------------------
-        # SUMMARY
-        # -------------------------
-        summary = f"🔥 {sum(len(v) for v in grouped.values())} new free games!"
-
-        await retry_async(lambda: channel.send(summary))
-
-    except Exception as e:
-        logger.error(
-            "Guild processing failed",
-            extra={"guild_id": guild.id, "error": str(e)}
-        )
+        except Exception as e:
+            logger.error(f"Send failed: {e}")
 
 
-# ==================================================
-# REGISTER EVENT HANDLER
-# ==================================================
-async def register_notifier():
-    await event_bus.subscribe("new_games", handle_new_games)
+# =================================================
+# EVENT SUBSCRIBE
+# =================================================
+def register_notifier(bot):
+
+    async def _wrapper(games):
+        await handle_free_games(bot, games)
+
+    event_bus.subscribe("free_games_fetched", _wrapper)
