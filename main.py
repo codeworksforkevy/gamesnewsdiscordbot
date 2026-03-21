@@ -6,7 +6,7 @@ import logging
 import signal
 import json
 
-from aiohttp import web, ClientSession
+from aiohttp import web, ClientSession, ClientTimeout
 import discord
 from discord.ext import commands
 
@@ -16,6 +16,7 @@ from discord.ext import commands
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+REDIS_URL = os.getenv("REDIS_URL")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN missing")
@@ -76,6 +77,8 @@ from services.free_games_service import (
     init_cache
 )
 
+from services.redis_client import RedisClient
+
 from startup import startup_sync
 
 from commands.live_commands import register_live_commands
@@ -109,13 +112,13 @@ async def on_ready():
     try:
         await startup_sync(bot)
     except Exception as e:
-        logger.exception(f"Startup failed: {e}")
+        logger.exception("Startup failed", extra={"extra_data": {"error": str(e)}})
 
     try:
         synced = await bot.tree.sync()
         logger.info("Slash synced", extra={"extra_data": {"count": len(synced)}})
     except Exception as e:
-        logger.exception(f"Slash sync failed: {e}")
+        logger.exception("Slash sync failed", extra={"extra_data": {"error": str(e)}})
 
 
 # ==================================================
@@ -128,20 +131,12 @@ async def start_web_server(bot, app_state, monitor):
         return web.json_response({"status": "ok"})
 
     async def metrics(_):
-        m = monitor.get_metrics()
-
         return web.Response(
-            text=f"""
-monitor_cycles_total {m['monitor_cycles_total']}
-monitor_cycle_failures {m['monitor_cycle_failures']}
-""".strip(),
+            text="bot_up 1",
             content_type="text/plain"
         )
 
     app = await eventsub_server.create_app(bot, app_state)
-
-    app["bot"] = bot
-    app["app_state"] = app_state
 
     app.router.add_get("/", health)
     app.router.add_get("/metrics", metrics)
@@ -184,32 +179,47 @@ async def main():
 
     shutdown_event = asyncio.Event()
 
+    # -------------------------
     # DB
+    # -------------------------
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
     logger.info("Database connected")
 
-    # CACHE
+    # -------------------------
+    # CACHE (Redis)
+    # -------------------------
     await init_cache()
 
-    async with ClientSession() as session:
+    redis_client = None
+    if REDIS_URL:
+        try:
+            import redis.asyncio as redis
+            redis_client = RedisClient(redis.from_url(REDIS_URL))
+            logger.info("Redis client initialized")
+        except Exception as e:
+            logger.warning("Redis init failed", extra={"extra_data": {"error": str(e)}})
 
-        # 🔴 FIX: init_twitch_api HATASI
-        # Eğer bu fonksiyon yoksa:
-        # → direkt module kullan
-        # → veya init fonksiyonunu ekle (aşağıda anlattım)
+    # -------------------------
+    # HTTP SESSION
+    # -------------------------
+    timeout = ClientTimeout(total=15)
 
+    async with ClientSession(timeout=timeout) as session:
+
+        # -------------------------
+        # SERVICES
+        # -------------------------
         from services import twitch_api
+        from services.eventsub_manager import EventSubManager
+        from services.twitch_monitor import TwitchMonitor
 
         app_state.twitch_api = twitch_api.TwitchAPI(session)
-
-        # EventSub Manager
-        from services.eventsub_manager import EventSubManager
         app_state.eventsub_manager = EventSubManager(session)
 
-        eventsub_server.bot_instance = bot
-
+        # -------------------------
         # COMMANDS
+        # -------------------------
         register_live_commands(bot)
         await register_discounts(bot, session)
         await register_free_games(bot, session)
@@ -218,23 +228,25 @@ async def main():
         await register_utilities(bot)
         await register_help(bot)
 
-        # TASKS
+        # -------------------------
+        # BACKGROUND TASKS
+        # -------------------------
         free_task = asyncio.create_task(free_games_loop(session))
 
-        from services.monitor import TwitchMonitor
-
         monitor = TwitchMonitor(
-            twitch_api=app_state.twitch_api,
-            eventsub_manager=app_state.eventsub_manager,
-            db_pool=app_state.db.get_pool(),
+            bot=bot,
+            session=session,
+            redis=redis_client,
             interval=180
         )
 
-        monitor_task = asyncio.create_task(monitor.start())
+        monitor.start()  # ✅ FIX
 
         runner = await start_web_server(bot, app_state, monitor)
 
+        # -------------------------
         # SIGNAL HANDLING
+        # -------------------------
         loop = asyncio.get_running_loop()
 
         try:
@@ -245,17 +257,22 @@ async def main():
 
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
 
+        # -------------------------
+        # WAIT
+        # -------------------------
         await shutdown_event.wait()
 
         logger.info("Shutdown signal received")
 
+        # -------------------------
         # CLEANUP
-        for task in (free_task, monitor_task, bot_task):
-            task.cancel()
+        # -------------------------
+        monitor.stop()
+        free_task.cancel()
+        bot_task.cancel()
 
         await asyncio.gather(
             free_task,
-            monitor_task,
             bot_task,
             return_exceptions=True
         )
