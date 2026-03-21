@@ -1,72 +1,54 @@
-import asyncio
+import os
+import aiohttp
 import logging
-import json
 
 logger = logging.getLogger("eventsub")
+
+TWITCH_EVENTSUB_URL = "https://api.twitch.tv/helix/eventsub/subscriptions"
 
 
 class EventSubManager:
 
-    def __init__(self, twitch_api, session, db):
-        self.twitch_api = twitch_api
+    def __init__(self, session: aiohttp.ClientSession):
         self.session = session
-        self.db = db
 
-        self.subscriptions = {}
+    async def subscribe_stream_online(self, broadcaster_user_id: str, callback_url: str):
 
-    # ==================================================
-    # SUBSCRIBE STREAM ONLINE
-    # ==================================================
-
-    async def subscribe_stream_online(self, broadcaster_id: str):
+        headers = {
+            "Client-ID": os.getenv("TWITCH_CLIENT_ID"),
+            "Authorization": f"Bearer {os.getenv('TWITCH_APP_TOKEN')}",
+            "Content-Type": "application/json"
+        }
 
         payload = {
             "type": "stream.online",
             "version": "1",
             "condition": {
-                "broadcaster_user_id": broadcaster_id
+                "broadcaster_user_id": broadcaster_user_id
+            },
+            "transport": {
+                "method": "webhook",
+                "callback": callback_url,
+                "secret": os.getenv("TWITCH_EVENTSUB_SECRET", "supersecret")
             }
         }
 
-        # call twitch API (pseudo)
-        response = await self.twitch_api.create_eventsub(payload)
+        async with self.session.post(
+            TWITCH_EVENTSUB_URL,
+            headers=headers,
+            json=payload
+        ) as resp:
 
-        sub_id = response.get("id")
+            data = await resp.text()
 
-        self.subscriptions[sub_id] = payload
+            if resp.status >= 300:
+                logger.error(f"EventSub subscribe failed: {data}")
+            else:
+                logger.info(f"Subscribed to {broadcaster_user_id}")
 
-        logger.info("Subscribed stream.online", extra={"extra_data": {"id": sub_id}})
 
-        return sub_id
-
-    # ==================================================
-    # STREAM OFFLINE
-    # ==================================================
-
-    async def subscribe_stream_offline(self, broadcaster_id: str):
-
-        payload = {
-            "type": "stream.offline",
-            "version": "1",
-            "condition": {
-                "broadcaster_user_id": broadcaster_id
-            }
-        }
-
-        response = await self.twitch_api.create_eventsub(payload)
-
-        sub_id = response.get("id")
-
-        self.subscriptions[sub_id] = payload
-
-        return sub_id
-
-    # ==================================================
-    # CACHE (Redis / DB)
-    # ==================================================
-
-    async def get_cached_stream(self, user_id: str):
-        return await self.db.get_stream_cache(user_id)
-
-    async def set_cached_stream(self, user_id: str, data: dict):
-        await self.db.set_stream_cache(user_id, data)
+# 🔥 BACKWARD COMPAT (senin eski import için)
+async def subscribe_stream_online(broadcaster_user_id: str, callback_url: str):
+    async with aiohttp.ClientSession() as session:
+        manager = EventSubManager(session)
+        await manager.subscribe_stream_online(broadcaster_user_id, callback_url)
