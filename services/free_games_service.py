@@ -1,5 +1,3 @@
-# services/free_games_service.py
-
 import json
 import logging
 
@@ -10,10 +8,9 @@ from services.notifier import notify_discord
 
 logger = logging.getLogger("free-games")
 
-
 CACHE_KEY = "free_games_cache"
 
-# fallback in-memory cache (Railway restart-safe değil ama fallback olarak)
+# Railway fallback (non-persistent)
 _memory_cache = []
 
 
@@ -22,15 +19,13 @@ _memory_cache = []
 # ==================================================
 
 async def init_cache(redis=None):
-    """
-    Initialize cache safely
-    """
-
     if not redis:
         return
 
     try:
-        if not await redis.exists(CACHE_KEY):
+        exists = await redis.exists(CACHE_KEY)
+
+        if not exists:
             await redis.set(CACHE_KEY, json.dumps([]))
 
     except Exception as e:
@@ -41,14 +36,10 @@ async def init_cache(redis=None):
 
 
 # ==================================================
-# GET CACHE (FIXED MISSING FUNCTION)
+# GET CACHE (SAFE + FALLBACK)
 # ==================================================
 
 async def get_cached_free_games(redis=None):
-    """
-    Returns cached games safely
-    """
-
     global _memory_cache
 
     if not redis:
@@ -60,7 +51,6 @@ async def get_cached_free_games(redis=None):
         if not cached:
             return _memory_cache
 
-        # Redis returns bytes sometimes
         if isinstance(cached, bytes):
             cached = cached.decode("utf-8")
 
@@ -74,11 +64,42 @@ async def get_cached_free_games(redis=None):
 
     except Exception as e:
         logger.warning(
-            "Failed to read cache",
+            "Cache read failed",
             extra={"extra_data": {"error": str(e)}}
         )
-
         return _memory_cache
+
+
+# ==================================================
+# NORMALIZATION (OPTIONAL BUT STRONG)
+# ==================================================
+
+def normalize_games(games):
+    """
+    Prevent duplicate spam by normalizing game identity
+    """
+    normalized = []
+
+    seen = set()
+
+    for game in games:
+        # fallback identity strategy
+        key = (
+            game.get("title") or
+            game.get("name") or
+            game.get("id")
+        )
+
+        if not key:
+            continue
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        normalized.append(game)
+
+    return normalized
 
 
 # ==================================================
@@ -91,7 +112,7 @@ async def update_free_games_cache(session, bot=None, redis=None):
 
     try:
         # -------------------------
-        # FETCH SOURCES (ISOLATED)
+        # FETCH (ISOLATED)
         # -------------------------
         epic = []
         gog = []
@@ -112,10 +133,11 @@ async def update_free_games_cache(session, bot=None, redis=None):
                 extra={"extra_data": {"error": str(e)}}
             )
 
-        new_games = epic + gog
+        # Merge + normalize
+        new_games = normalize_games(epic + gog)
 
         # -------------------------
-        # LOAD OLD CACHE
+        # LOAD CACHE
         # -------------------------
         old_games = await get_cached_free_games(redis)
 
@@ -134,19 +156,19 @@ async def update_free_games_cache(session, bot=None, redis=None):
         )
 
         # -------------------------
-        # NOTIFY
+        # NOTIFY (SAFE)
         # -------------------------
         if bot:
             try:
                 await notify_discord(bot, new_only)
             except Exception as e:
-                logger.warning(
+                logger.exception(
                     "Notify failed",
                     extra={"extra_data": {"error": str(e)}}
                 )
 
         # -------------------------
-        # UPDATE CACHE
+        # CACHE UPDATE (SAFE)
         # -------------------------
         try:
             _memory_cache = new_games
@@ -161,7 +183,7 @@ async def update_free_games_cache(session, bot=None, redis=None):
             )
 
     except Exception as e:
-        logger.error(
+        logger.exception(
             "Free games update failed",
             extra={"extra_data": {"error": str(e)}}
         )
