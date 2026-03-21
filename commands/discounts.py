@@ -1,5 +1,6 @@
 import discord
 from discord import app_commands
+
 from services.steam import fetch_steam_discounts
 from utils.pagination import RedisPagination
 from config import PLATFORM_COLORS
@@ -9,51 +10,91 @@ async def register(bot, session):
 
     async def discounts_callback(interaction: discord.Interaction):
 
-        steam_games = await fetch_steam_discounts(session)
+        await interaction.response.defer(thinking=True)
+
+        try:
+            steam_games = await fetch_steam_discounts(session)
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ Error fetching discounts: {e}",
+                ephemeral=True
+            )
+            return
 
         if not steam_games:
-            await interaction.response.send_message(
-                "No major discounts found.",
+            await interaction.followup.send(
+                "No major discounts found right now.",
                 ephemeral=True
             )
             return
 
         pages = []
 
-        for i in range(0, len(steam_games), 2):
-            chunk = steam_games[i:i+2]
-            desc = ""
+        # =========================
+        # PAGINATION BUILD
+        # =========================
+        for i in range(0, len(steam_games), 3):
 
-            for g in chunk:
-                desc += (
-                    f"**{g['title']}**\n"
-                    f"{g.get('discount','On Sale')} OFF\n"
-                    f"{g['url']}\n\n"
-                )
+            chunk = steam_games[i:i+3]
 
             embed = discord.Embed(
-                title="Steam Major Discounts",
-                description=desc.strip(),
+                title="🎮 Steam Discounts",
                 color=PLATFORM_COLORS.get("steam")
             )
 
-            if chunk[0].get("thumbnail"):
-                embed.set_thumbnail(url=chunk[0]["thumbnail"])
+            for game in chunk:
 
-            embed.set_footer(text=f"Steam • Page {i//2+1}")
+                name = game.get("name", "Unknown Game")
+                discount = game.get("discount", 0)
+                final_price = game.get("final_price")
+                original_price = game.get("original_price")
+                url = game.get("url", "#")
+
+                # price formatting
+                price_text = ""
+
+                if final_price and original_price:
+                    price_text = f"💰 ~~{original_price}~~ → **{final_price}**"
+                else:
+                    price_text = "💰 Price unavailable"
+
+                discount_text = f"🔥 **-{discount}%**" if discount else "🔥 On Sale"
+
+                embed.add_field(
+                    name=name,
+                    value=f"{discount_text}\n{price_text}\n🔗 [View Game]({url})",
+                    inline=False
+                )
+
+            # Thumbnail fallback
+            first_thumb = chunk[0].get("thumbnail") if chunk else None
+            if first_thumb:
+                embed.set_thumbnail(url=first_thumb)
+
+            embed.set_footer(
+                text=f"Steam • Page {i//3 + 1} • {len(steam_games)} deals"
+            )
+
             pages.append(embed)
 
+        # =========================
+        # PAGINATION VIEW
+        # =========================
         view = RedisPagination(pages, interaction.user.id)
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=pages[0],
             view=view
         )
 
+    # =========================
+    # COMMAND REGISTRATION
+    # =========================
     bot.tree.add_command(
         app_commands.Command(
             name="game_discounts",
-            description="Show current major game discounts",
+            description="Browse current Steam discounts with pagination",
             callback=discounts_callback
         )
     )
