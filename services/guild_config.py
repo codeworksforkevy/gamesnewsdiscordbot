@@ -1,13 +1,34 @@
-async def upsert_guild_config(db, guild_id, channel_id, role_id):
+import asyncpg
 
-    pool = db.get_pool()
 
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO guild_config (guild_id, default_channel_id, default_role_id)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (guild_id)
-            DO UPDATE SET
-                default_channel_id = EXCLUDED.default_channel_id,
-                default_role_id = EXCLUDED.default_role_id;
-        """, str(guild_id), str(channel_id), role_id)
+# ==================================================
+# UPSERT CONFIG
+# ==================================================
+
+async def upsert_guild_config(db: asyncpg.Pool, guild_id: int, channel_id: int, role_id: int | None):
+
+    await db.execute(
+        """
+        INSERT INTO guild_configs (guild_id, channel_id, role_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (guild_id)
+        DO UPDATE SET
+            channel_id = EXCLUDED.channel_id,
+            role_id = EXCLUDED.role_id
+        """,
+        guild_id,
+        channel_id,
+        role_id
+    )
+
+
+# ==================================================
+# GET CONFIG
+# ==================================================
+
+async def get_guild_config(db: asyncpg.Pool, guild_id: int):
+
+    return await db.fetchrow(
+        "SELECT * FROM guild_configs WHERE guild_id=$1",
+        guild_id
+    )
