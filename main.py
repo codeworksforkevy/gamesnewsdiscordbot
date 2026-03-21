@@ -206,11 +206,7 @@ async def main():
         # EventSub Manager
         from services.eventsub_manager import EventSubManager
 
-        app_state.eventsub_manager = EventSubManager(
-            twitch_api=app_state.twitch_api,
-            session=session,
-            db=app_state.db
-        )
+        app_state.eventsub_manager = EventSubManager(session)
 
         # attach bot (legacy support)
         eventsub_server.bot_instance = bot
