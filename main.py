@@ -202,7 +202,7 @@ async def main():
         # -------------------------
 
         # ⚠️ FIX: live commands now needs app_state
-        register_live_commands(bot, app_state)
+        await register_live_commands(bot, app_state)
 
         # async olanlar await edilmeli
         await register_discounts(bot, session)
