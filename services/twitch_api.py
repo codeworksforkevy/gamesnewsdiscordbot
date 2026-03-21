@@ -7,101 +7,83 @@ import aiohttp
 logger = logging.getLogger("twitch-api")
 
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
-HELIX_BASE = "https://api.twitch.tv/helix"
+HELIX = "https://api.twitch.tv/helix"
 
 
 class TwitchAPI:
 
-    def __init__(self, session: aiohttp.ClientSession):
-
+    def __init__(self, session):
         self.session = session
 
         self.client_id = os.getenv("TWITCH_CLIENT_ID")
         self.client_secret = os.getenv("TWITCH_CLIENT_SECRET")
 
-        if not self.client_id or not self.client_secret:
-            raise RuntimeError("Twitch credentials missing")
-
-        self._app_token = None
+        self._token = None
         self._expiry = 0
-        self._token_lock = asyncio.Lock()
+        self._lock = asyncio.Lock()
 
-    async def get_app_token(self):
+    async def get_token(self):
 
-        async with self._token_lock:
+        async with self._lock:
 
             now = time.time()
 
-            if self._app_token and now < self._expiry:
-                return self._app_token
+            if self._token and now < self._expiry:
+                return self._token
 
-            payload = {
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "grant_type": "client_credentials"
-            }
-
-            async with self.session.post(TOKEN_URL, data=payload) as resp:
-
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.error("Token request failed: %s", text)
-                    return None
+            async with self.session.post(
+                TOKEN_URL,
+                data={
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "grant_type": "client_credentials"
+                }
+            ) as resp:
 
                 data = await resp.json()
 
-                self._app_token = data["access_token"]
-                expires_in = data.get("expires_in", 3600)
+                self._token = data["access_token"]
+                self._expiry = now + data.get("expires_in", 3600) - 60
 
-                self._expiry = now + expires_in - 60
+                return self._token
 
-                logger.info("Twitch token refreshed")
+    async def request(self, endpoint, params=None):
 
-                return self._app_token
-
-    async def helix_request(self, endpoint, params=None):
-
-        token = await self.get_app_token()
-        if not token:
-            return None
+        token = await self.get_token()
 
         headers = {
             "Client-ID": self.client_id,
             "Authorization": f"Bearer {token}"
         }
 
-        url = f"{HELIX_BASE}/{endpoint}"
-
-        async with self.session.get(url, headers=headers, params=params) as resp:
-
-            if resp.status == 401:
-                self._app_token = None
-                return await self.helix_request(endpoint, params)
+        async with self.session.get(
+            f"{HELIX}/{endpoint}",
+            headers=headers,
+            params=params
+        ) as resp:
 
             if resp.status != 200:
-                logger.error("Helix error: %s", await resp.text())
                 return None
 
             return await resp.json()
 
+    # ==================================================
+    # 🔥 STREAM METADATA
+    # ==================================================
 
-# ==================================================
-# GLOBAL INSTANCE (FIX HERE)
-# ==================================================
+    async def get_stream_metadata(self, broadcaster_id):
 
-twitch_api: TwitchAPI | None = None
+        data = await self.request(
+            "streams",
+            {"user_id": broadcaster_id}
+        )
 
+        if not data or not data.get("data"):
+            return None
 
-async def init_twitch_api():
-    global twitch_api
+        stream = data["data"][0]
 
-    if twitch_api is not None:
-        return twitch_api
-
-    import aiohttp
-
-    session = aiohttp.ClientSession()
-
-    twitch_api = TwitchAPI(session)
-
-    return twitch_api
+        return {
+            "title": stream.get("title"),
+            "game": stream.get("game_name")
+        }
