@@ -10,7 +10,6 @@ from aiohttp import web, ClientSession
 import discord
 from discord.ext import commands
 
-
 # ==================================================
 # ENV
 # ==================================================
@@ -26,7 +25,7 @@ if not DATABASE_URL:
 
 
 # ==================================================
-# STRUCTURED JSON LOGGING
+# LOGGING
 # ==================================================
 
 class JsonFormatter(logging.Formatter):
@@ -60,6 +59,8 @@ logger = logging.getLogger("find-a-curie")
 
 intents = discord.Intents.default()
 intents.message_content = False
+intents.guilds = True
+intents.members = True  # 🔥 role system için gerekli
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -71,13 +72,15 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 from services.db import Database
 from services.state import AppState
 from services.eventsub_server import create_eventsub_app
-from services.monitor import TwitchMonitor
 from services.twitch_api import TwitchAPI
 from services.eventsub_manager import EventSubManager
+
 from services.free_games_service import (
     update_free_games_cache,
     init_cache
 )
+
+from startup import startup_sync  # 🔥 EKLENDİ
 
 from commands.live_commands import register_live_commands
 from commands.discounts import register as register_discounts
@@ -87,7 +90,7 @@ from commands.twitch_badges import register as register_twitch_badges
 from commands.utilities.register import register_utilities
 from commands.help import register as register_help
 
-# 🔥 IMPORTANT
+# EventSub server
 from services import eventsub_server
 
 
@@ -111,6 +114,12 @@ async def on_ready():
         extra={"extra_data": {"user": str(bot.user)}}
     )
 
+    # 🔥 STARTUP SYNC (CRITICAL)
+    try:
+        await startup_sync(bot)
+    except Exception as e:
+        logger.exception(f"Startup sync failed: {e}")
+
     try:
         synced = await bot.tree.sync()
         logger.info(
@@ -128,7 +137,7 @@ async def on_ready():
 # WEB SERVER
 # ==================================================
 
-async def start_web_server(bot, app_state: AppState, monitor: TwitchMonitor):
+async def start_web_server(bot, app_state: AppState, monitor):
 
     async def health(request):
         return web.json_response({"status": "ok"})
@@ -146,6 +155,9 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
         )
 
     app = await create_eventsub_app(bot, app_state)
+
+    # inject bot (CRITICAL)
+    app.state.bot = bot
 
     app.router.add_get("/", health)
     app.router.add_get("/metrics", metrics)
@@ -200,10 +212,8 @@ async def main():
 
     logger.info("Database connected")
 
-    pool = app_state.db.get_pool()
-
     # -------------------------------------------------
-    # CACHE INIT
+    # CACHE
     # -------------------------------------------------
 
     await init_cache()
@@ -218,7 +228,7 @@ async def main():
         app_state.twitch_api = TwitchAPI(session)
         app_state.eventsub_manager = EventSubManager(session)
 
-        # 🔥 EventSub bot injection (CRITICAL)
+        # 🔥 Bot injection for EventSub server
         eventsub_server.bot_instance = bot
 
         # -------------------------------------------------
@@ -241,10 +251,16 @@ async def main():
             free_games_loop(session)
         )
 
+        # -------------------------------------------------
+        # MONITOR
+        # -------------------------------------------------
+
+        from services.monitor import TwitchMonitor
+
         monitor = TwitchMonitor(
             twitch_api=app_state.twitch_api,
             eventsub_manager=app_state.eventsub_manager,
-            db_pool=pool,
+            db_pool=app_state.db.get_pool(),
             interval=180
         )
 
@@ -263,7 +279,7 @@ async def main():
         )
 
         # -------------------------------------------------
-        # SIGNALS
+        # SIGNAL HANDLING
         # -------------------------------------------------
 
         loop = asyncio.get_running_loop()
