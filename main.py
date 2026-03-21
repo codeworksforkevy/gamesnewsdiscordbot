@@ -26,7 +26,7 @@ if not DATABASE_URL:
 
 
 # ==================================================
-# LOGGING
+# LOGGING (Railway-safe JSON logs)
 # ==================================================
 
 class JsonFormatter(logging.Formatter):
@@ -55,7 +55,7 @@ logger = logging.getLogger("bot")
 
 
 # ==================================================
-# DISCORD
+# DISCORD BOT
 # ==================================================
 
 intents = discord.Intents.default()
@@ -143,10 +143,7 @@ async def start_web_server(bot, app_state, monitor):
         return web.json_response({"status": "ok"})
 
     async def metrics(_):
-        return web.Response(
-            text="bot_up 1",
-            content_type="text/plain"
-        )
+        return web.Response(text="bot_up 1", content_type="text/plain")
 
     app = await eventsub_server.create_app(bot, app_state)
 
@@ -170,7 +167,7 @@ async def start_web_server(bot, app_state, monitor):
 
 
 # ==================================================
-# FREE GAMES LOOP (UPDATED)
+# FREE GAMES LOOP (SAFE + RETRY READY)
 # ==================================================
 
 async def free_games_loop(session, bot, redis_client):
@@ -185,7 +182,7 @@ async def free_games_loop(session, bot, redis_client):
 
         except Exception as e:
             logger.error(
-                "Free games failed",
+                "Free games update failed",
                 extra={"extra_data": {"error": str(e)}}
             )
 
@@ -209,25 +206,32 @@ async def main():
     logger.info("Database connected")
 
     # -------------------------
-    # CACHE (Redis)
+    # REDIS (SAFE INIT)
     # -------------------------
-    await init_cache()
-
     redis_client = None
 
     if REDIS_URL:
         try:
             import redis.asyncio as redis
 
-            redis_client = RedisClient(redis.from_url(REDIS_URL))
+            raw = redis.from_url(REDIS_URL)
 
-            logger.info("Redis client initialized")
+            redis_client = RedisClient(raw)
+
+            # FIX: pass redis to cache init
+            await init_cache(raw)
+
+            logger.info("Redis initialized")
 
         except Exception as e:
             logger.warning(
-                "Redis init failed",
+                "Redis disabled (fallback to no-cache mode)",
                 extra={"extra_data": {"error": str(e)}}
             )
+            redis_client = None
+
+    else:
+        logger.warning("Redis URL not provided, running without cache")
 
     # -------------------------
     # HTTP SESSION
@@ -277,20 +281,26 @@ async def main():
         runner = await start_web_server(bot, app_state, monitor)
 
         # -------------------------
-        # SIGNAL HANDLING
+        # SIGNAL HANDLING (Railway friendly)
         # -------------------------
         loop = asyncio.get_running_loop()
 
-        try:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, shutdown_event.set)
-        except NotImplementedError:
-            logger.warning("Signal handlers not supported")
+        def _shutdown():
+            shutdown_event.set()
 
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _shutdown)
+            except NotImplementedError:
+                logger.warning("Signal handler not supported in this environment")
+
+        # -------------------------
+        # START BOT
+        # -------------------------
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
 
         # -------------------------
-        # WAIT
+        # WAIT FOR SHUTDOWN
         # -------------------------
         await shutdown_event.wait()
 
@@ -328,4 +338,7 @@ async def main():
 # ==================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received, exiting...")
