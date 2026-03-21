@@ -58,7 +58,6 @@ logger = logging.getLogger("bot")
 # ==================================================
 
 intents = discord.Intents.default()
-intents.message_content = False
 intents.guilds = True
 intents.members = True
 
@@ -100,7 +99,7 @@ bot.logger = logger
 
 
 # ==================================================
-# READY
+# READY EVENT
 # ==================================================
 
 @bot.event
@@ -141,7 +140,6 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
 
     app = await eventsub_server.create_app(bot, app_state)
 
-    # ✅ FIX (aiohttp pattern)
     app["bot"] = bot
     app["app_state"] = app_state
 
@@ -156,16 +154,13 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
 
     await site.start()
 
-    logger.info(
-        "Web server started",
-        extra={"extra_data": {"port": port}}
-    )
+    logger.info("Web server started", extra={"extra_data": {"port": port}})
 
     return runner
 
 
 # ==================================================
-# LOOP
+# FREE GAMES LOOP
 # ==================================================
 
 async def free_games_loop(session):
@@ -199,22 +194,22 @@ async def main():
 
     async with ClientSession() as session:
 
-        # Twitch API
-        from services.twitch_api import init_twitch_api
-        app_state.twitch_api = await init_twitch_api()
+        # 🔴 FIX: init_twitch_api HATASI
+        # Eğer bu fonksiyon yoksa:
+        # → direkt module kullan
+        # → veya init fonksiyonunu ekle (aşağıda anlattım)
+
+        from services import twitch_api
+
+        app_state.twitch_api = twitch_api.TwitchAPI(session)
 
         # EventSub Manager
         from services.eventsub_manager import EventSubManager
-
         app_state.eventsub_manager = EventSubManager(session)
 
-        # attach bot (legacy support)
         eventsub_server.bot_instance = bot
 
-        # ==================================================
         # COMMANDS
-        # ==================================================
-
         register_live_commands(bot)
         await register_discounts(bot, session)
         await register_free_games(bot, session)
@@ -223,10 +218,7 @@ async def main():
         await register_utilities(bot)
         await register_help(bot)
 
-        # ==================================================
         # TASKS
-        # ==================================================
-
         free_task = asyncio.create_task(free_games_loop(session))
 
         from services.monitor import TwitchMonitor
@@ -242,17 +234,13 @@ async def main():
 
         runner = await start_web_server(bot, app_state, monitor)
 
-        # ==================================================
-        # SIGNALS (Docker-safe)
-        # ==================================================
-
+        # SIGNAL HANDLING
         loop = asyncio.get_running_loop()
 
         try:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, shutdown_event.set)
         except NotImplementedError:
-            # Windows / some environments
             logger.warning("Signal handlers not supported")
 
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
@@ -261,10 +249,7 @@ async def main():
 
         logger.info("Shutdown signal received")
 
-        # ==================================================
         # CLEANUP
-        # ==================================================
-
         for task in (free_task, monitor_task, bot_task):
             task.cancel()
 
