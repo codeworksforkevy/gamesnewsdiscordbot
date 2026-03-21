@@ -4,7 +4,7 @@ import logging
 from services.epic import fetch_epic_free
 from services.gog import fetch_gog_free
 from services.diff_engine import diff_games
-from services.notifier import notify_discord
+from core.event_bus import event_bus
 
 logger = logging.getLogger("free-games")
 
@@ -15,9 +15,24 @@ _memory_cache = []
 
 
 # ==================================================
+# RETRY HELPER
+# ==================================================
+async def retry_async(func, retries=3, delay=2):
+    last_error = None
+
+    for attempt in range(retries):
+        try:
+            return await func()
+        except Exception as e:
+            last_error = e
+            await asyncio.sleep(delay * (2 ** attempt))
+
+    raise last_error
+
+
+# ==================================================
 # INIT CACHE
 # ==================================================
-
 async def init_cache(redis=None):
     if not redis:
         return
@@ -36,9 +51,8 @@ async def init_cache(redis=None):
 
 
 # ==================================================
-# GET CACHE (SAFE + FALLBACK)
+# GET CACHE
 # ==================================================
-
 async def get_cached_free_games(redis=None):
     global _memory_cache
 
@@ -71,29 +85,20 @@ async def get_cached_free_games(redis=None):
 
 
 # ==================================================
-# NORMALIZATION (OPTIONAL BUT STRONG)
+# NORMALIZATION
 # ==================================================
-
 def normalize_games(games):
-    """
-    Prevent duplicate spam by normalizing game identity
-    """
     normalized = []
-
     seen = set()
 
     for game in games:
-        # fallback identity strategy
         key = (
-            game.get("title") or
-            game.get("name") or
-            game.get("id")
+            game.get("title")
+            or game.get("name")
+            or game.get("id")
         )
 
-        if not key:
-            continue
-
-        if key in seen:
+        if not key or key in seen:
             continue
 
         seen.add(key)
@@ -103,37 +108,43 @@ def normalize_games(games):
 
 
 # ==================================================
-# UPDATE CACHE + DIFF + NOTIFY
+# FETCH + PROCESS PIPELINE (EVENT-DRIVEN)
 # ==================================================
-
-async def update_free_games_cache(session, bot=None, redis=None):
+async def update_free_games_cache(session, redis=None):
 
     global _memory_cache
 
     try:
         # -------------------------
-        # FETCH (ISOLATED)
+        # FETCH (ISOLATED + RETRY)
         # -------------------------
-        epic = []
-        gog = []
+        async def fetch_epic():
+            return await fetch_epic_free(session)
+
+        async def fetch_gog():
+            return await fetch_gog_free(session)
 
         try:
-            epic = await fetch_epic_free(session)
+            epic = await retry_async(fetch_epic)
         except Exception as e:
             logger.warning(
                 "Epic fetch failed",
                 extra={"extra_data": {"error": str(e)}}
             )
+            epic = []
 
         try:
-            gog = await fetch_gog_free(session)
+            gog = await retry_async(fetch_gog)
         except Exception as e:
             logger.warning(
                 "GOG fetch failed",
                 extra={"extra_data": {"error": str(e)}}
             )
+            gog = []
 
-        # Merge + normalize
+        # -------------------------
+        # MERGE + NORMALIZE
+        # -------------------------
         new_games = normalize_games(epic + gog)
 
         # -------------------------
@@ -156,16 +167,9 @@ async def update_free_games_cache(session, bot=None, redis=None):
         )
 
         # -------------------------
-        # NOTIFY (SAFE)
+        # EVENT EMIT (CRITICAL)
         # -------------------------
-        if bot:
-            try:
-                await notify_discord(bot, new_only)
-            except Exception as e:
-                logger.exception(
-                    "Notify failed",
-                    extra={"extra_data": {"error": str(e)}}
-                )
+        await event_bus.emit("free_games_fetched", new_only)
 
         # -------------------------
         # CACHE UPDATE (SAFE)
