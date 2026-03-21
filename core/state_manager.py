@@ -1,71 +1,27 @@
-import asyncio
-import logging
+# core/state_manager.py
 
-logger = logging.getLogger("state-manager")
+from typing import Optional
+import asyncpg
 
 
-class StateManager:
+class AppState:
     """
-    Central in-memory state store
-    Thread-safe and async-safe
+    Central application state (event-driven architecture core)
     """
 
     def __init__(self):
-        self._lock = asyncio.Lock()
-        self._state = {
-            "guilds": {},  # guild_id -> config/state
-            "last_fetch": {},
-            "running_tasks": set(),
-        }
+        self.db_pool: Optional[asyncpg.Pool] = None
+        self.redis = None  # optional
+        self.bot = None
 
-    # =========================
-    # GUILD MANAGEMENT
-    # =========================
-    async def set_guild_state(self, guild_id: int, data: dict):
-        async with self._lock:
-            self._state["guilds"][guild_id] = data
+    def set_db_pool(self, pool: asyncpg.Pool):
+        self.db_pool = pool
 
-    async def get_guild_state(self, guild_id: int):
-        async with self._lock:
-            return self._state["guilds"].get(guild_id)
-
-    async def get_all_guilds(self):
-        async with self._lock:
-            return list(self._state["guilds"].keys())
-
-    # =========================
-    # FETCH TRACKING
-    # =========================
-    async def set_last_fetch(self, source: str, timestamp: float):
-        async with self._lock:
-            self._state["last_fetch"][source] = timestamp
-
-    async def get_last_fetch(self, source: str):
-        async with self._lock:
-            return self._state["last_fetch"].get(source)
-
-    # =========================
-    # TASK TRACKING
-    # =========================
-    async def add_task(self, task_id: str):
-        async with self._lock:
-            self._state["running_tasks"].add(task_id)
-
-    async def remove_task(self, task_id: str):
-        async with self._lock:
-            self._state["running_tasks"].discard(task_id)
-
-    async def is_running(self, task_id: str):
-        async with self._lock:
-            return task_id in self._state["running_tasks"]
-
-    # =========================
-    # DEBUG
-    # =========================
-    async def snapshot(self):
-        async with self._lock:
-            return dict(self._state)
+    def get_db_pool(self) -> asyncpg.Pool:
+        if not self.db_pool:
+            raise RuntimeError("DB pool not initialized in AppState")
+        return self.db_pool
 
 
-# Singleton instance (global usage)
-state_manager = StateManager()
+# Global instance
+state = AppState()
