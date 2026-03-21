@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 
 from services.epic import fetch_epic_free
 from services.gog import fetch_gog_free
@@ -44,10 +45,7 @@ async def init_cache(redis=None):
             await redis.set(CACHE_KEY, json.dumps([]))
 
     except Exception as e:
-        logger.warning(
-            "Cache init failed",
-            extra={"extra_data": {"error": str(e)}}
-        )
+        logger.warning(f"Cache init failed: {e}")
 
 
 # ==================================================
@@ -77,10 +75,7 @@ async def get_cached_free_games(redis=None):
         return data
 
     except Exception as e:
-        logger.warning(
-            "Cache read failed",
-            extra={"extra_data": {"error": str(e)}}
-        )
+        logger.warning(f"Cache read failed: {e}")
         return _memory_cache
 
 
@@ -108,15 +103,14 @@ def normalize_games(games):
 
 
 # ==================================================
-# FETCH + PROCESS PIPELINE (EVENT-DRIVEN)
+# FETCH + PROCESS PIPELINE
 # ==================================================
-async def update_free_games_cache(session, redis=None):
-
+async def update_free_games_cache(session, redis=None, bot=None):
     global _memory_cache
 
     try:
         # -------------------------
-        # FETCH (ISOLATED + RETRY)
+        # FETCH
         # -------------------------
         async def fetch_epic():
             return await fetch_epic_free(session)
@@ -127,23 +121,17 @@ async def update_free_games_cache(session, redis=None):
         try:
             epic = await retry_async(fetch_epic)
         except Exception as e:
-            logger.warning(
-                "Epic fetch failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
+            logger.warning(f"Epic fetch failed: {e}")
             epic = []
 
         try:
             gog = await retry_async(fetch_gog)
         except Exception as e:
-            logger.warning(
-                "GOG fetch failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
+            logger.warning(f"GOG fetch failed: {e}")
             gog = []
 
         # -------------------------
-        # MERGE + NORMALIZE
+        # MERGE
         # -------------------------
         new_games = normalize_games(epic + gog)
 
@@ -161,33 +149,21 @@ async def update_free_games_cache(session, redis=None):
             logger.info("No new games found")
             return
 
-        logger.info(
-            "New games detected",
-            extra={"extra_data": {"count": len(new_only)}}
-        )
+        logger.info(f"New games detected: {len(new_only)}")
 
         # -------------------------
-        # EVENT EMIT (CRITICAL)
+        # EVENT EMIT
         # -------------------------
-        await event_bus.emit("free_games_fetched", new_only)
+        if event_bus:
+            await event_bus.emit("free_games_fetched", new_only)
 
         # -------------------------
-        # CACHE UPDATE (SAFE)
+        # CACHE UPDATE
         # -------------------------
-        try:
-            _memory_cache = new_games
+        _memory_cache = new_games
 
-            if redis:
-                await redis.set(CACHE_KEY, json.dumps(new_games))
-
-        except Exception as e:
-            logger.warning(
-                "Cache update failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
+        if redis:
+            await redis.set(CACHE_KEY, json.dumps(new_games))
 
     except Exception as e:
-        logger.exception(
-            "Free games update failed",
-            extra={"extra_data": {"error": str(e)}}
-        )
+        logger.exception(f"Free games update failed: {e}")
