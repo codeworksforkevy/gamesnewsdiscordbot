@@ -25,7 +25,7 @@ class EventSubManager:
             raise RuntimeError("PUBLIC_BASE_URL missing")
 
     # ==================================================
-    # APP TOKEN (CONCURRENCY SAFE)
+    # APP TOKEN
     # ==================================================
 
     async def get_app_access_token(self):
@@ -81,7 +81,36 @@ class EventSubManager:
         }
 
     # ==================================================
-    # CREATE SUBSCRIPTION
+    # RETRY WRAPPER
+    # ==================================================
+
+    async def _post_with_retry(self, url, json, headers, retries=3):
+
+        delay = 1
+
+        for attempt in range(retries):
+
+            async with self.session.post(url, json=json, headers=headers) as resp:
+
+                text = await resp.text()
+
+                if resp.status in (200, 202, 409):
+                    return resp.status, text
+
+                logger.warning(
+                    "Retry %s failed (%s): %s",
+                    attempt,
+                    resp.status,
+                    text
+                )
+
+            await asyncio.sleep(delay)
+            delay *= 2
+
+        return resp.status, text
+
+    # ==================================================
+    # CREATE SUB
     # ==================================================
 
     async def create_subscription(self, broadcaster_id: str, sub_type: str):
@@ -103,23 +132,31 @@ class EventSubManager:
 
         headers = await self._auth_headers()
 
-        async with self.session.post(url, json=payload, headers=headers) as resp:
+        status, text = await self._post_with_retry(url, payload, headers)
 
-            text = await resp.text()
+        if status in (200, 202):
+            logger.info("Subscription created: %s (%s)", sub_type, broadcaster_id)
+            return True
 
-            if resp.status in (200, 202):
-                logger.info("Subscription created: %s (%s)", sub_type, broadcaster_id)
-                return True
+        if status == 409:
+            logger.info("Already exists: %s (%s)", sub_type, broadcaster_id)
+            return True
 
-            if resp.status == 409:
-                logger.info("Subscription already exists: %s (%s)", sub_type, broadcaster_id)
-                return True
-
-            logger.error("Subscription failed (%s): %s", resp.status, text)
-            return False
+        logger.error("Subscription failed (%s): %s", status, text)
+        return False
 
     # ==================================================
-    # LIST SUBSCRIPTIONS
+    # FULL SETUP
+    # ==================================================
+
+    async def subscribe_all(self, broadcaster_id: str):
+
+        await self.create_subscription(broadcaster_id, "stream.online")
+        await self.create_subscription(broadcaster_id, "stream.offline")
+        await self.create_subscription(broadcaster_id, "channel.update")
+
+    # ==================================================
+    # LIST
     # ==================================================
 
     async def list_subscriptions(self):
@@ -131,17 +168,8 @@ class EventSubManager:
 
             if resp.status != 200:
                 text = await resp.text()
-                logger.error("List subscriptions failed: %s", text)
+                logger.error("List failed: %s", text)
                 return []
 
             data = await resp.json()
             return data.get("data", [])
-
-    # ==================================================
-    # ENSURE STREAM SUBS
-    # ==================================================
-
-    async def ensure_stream_subscriptions(self, broadcaster_id: str):
-
-        await self.create_subscription(broadcaster_id, "stream.online")
-        await self.create_subscription(broadcaster_id, "stream.offline")
