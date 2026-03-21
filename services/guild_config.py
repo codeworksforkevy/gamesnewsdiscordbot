@@ -2,23 +2,40 @@ import asyncpg
 
 
 # ==================================================
-# UPSERT CONFIG
+# UPSERT CONFIG (GÜNCELLENDİ)
 # ==================================================
 
-async def upsert_guild_config(db: asyncpg.Pool, guild_id: int, channel_id: int, role_id: int | None):
+async def upsert_guild_config(
+    db: asyncpg.Pool,
+    guild_id: int,
+    channel_id: int,
+    ping_role_id: int | None,
+    live_role_id: int | None,
+    enable_ping: bool = True
+):
 
     await db.execute(
         """
-        INSERT INTO guild_configs (guild_id, channel_id, role_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO guild_configs (
+            guild_id,
+            channel_id,
+            ping_role_id,
+            live_role_id,
+            enable_ping
+        )
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (guild_id)
         DO UPDATE SET
             channel_id = EXCLUDED.channel_id,
-            role_id = EXCLUDED.role_id
+            ping_role_id = EXCLUDED.ping_role_id,
+            live_role_id = EXCLUDED.live_role_id,
+            enable_ping = EXCLUDED.enable_ping
         """,
         guild_id,
         channel_id,
-        role_id
+        ping_role_id,
+        live_role_id,
+        enable_ping
     )
 
 
