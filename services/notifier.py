@@ -4,16 +4,18 @@ import json
 import hashlib
 import discord
 
-from services.channel_registry import get_channels
+from core.event_bus import event_bus
+from core.state_manager import state_manager
 
 logger = logging.getLogger("notifier")
 
 CACHE_KEY = "notified_games_hash"
+
 _memory_last_hash = None
 
 
 # ==================================================
-# HASHING (DEDUP)
+# HASH (DEDUP)
 # ==================================================
 def hash_games(games):
     try:
@@ -25,9 +27,9 @@ def hash_games(games):
 
 
 # ==================================================
-# RETRY HELPER
+# RETRY (ROBUST)
 # ==================================================
-async def retry_async(func, retries=3, delay=2):
+async def retry_async(func, retries=3, base_delay=1):
     last_error = None
 
     for attempt in range(retries):
@@ -35,13 +37,13 @@ async def retry_async(func, retries=3, delay=2):
             return await func()
         except Exception as e:
             last_error = e
-            await asyncio.sleep(delay * (2 ** attempt))
+            await asyncio.sleep(base_delay * (2 ** attempt))
 
     raise last_error
 
 
 # ==================================================
-# EMBED BUILDER (UX)
+# EMBED BUILDER (UX ENHANCED)
 # ==================================================
 def build_embed(game):
     embed = discord.Embed(
@@ -74,24 +76,61 @@ def group_by_platform(games):
 
     for game in games:
         platform = game.get("platform", "Unknown")
-
         grouped.setdefault(platform, []).append(game)
 
     return grouped
 
 
 # ==================================================
-# MAIN NOTIFIER (MULTI-GUILD)
+# SAFE CHANNEL RESOLVE (MULTI-GUILD)
 # ==================================================
-async def notify_discord(bot, games, redis=None):
+async def resolve_channel(bot, guild_id: int):
+    try:
+        state = await state_manager.get_guild_state(guild_id)
 
-    if not games:
+        if not state:
+            return None
+
+        channel_id = state.get("channel_id")
+
+        if not channel_id:
+            return None
+
+        channel = bot.get_channel(channel_id)
+
+        if channel:
+            return channel
+
+        return await bot.fetch_channel(channel_id)
+
+    except Exception as e:
+        logger.warning(
+            "Channel resolve failed",
+            extra={"guild_id": guild_id, "error": str(e)}
+        )
+        return None
+
+
+# ==================================================
+# CORE NOTIFIER (EVENT HANDLER)
+# ==================================================
+async def handle_new_games(data):
+    """
+    Event-driven handler:
+    triggered by event_bus.publish("new_games", games)
+    """
+
+    bot = data.get("bot")
+    games = data.get("games")
+    redis = data.get("redis")
+
+    if not bot or not games:
         return
 
     global _memory_last_hash
 
     # -------------------------
-    # DEDUP CHECK
+    # DEDUP
     # -------------------------
     current_hash = hash_games(games)
 
@@ -99,6 +138,7 @@ async def notify_discord(bot, games, redis=None):
         logger.warning("Hash generation failed")
         return
 
+    # Redis check
     if redis:
         try:
             last_hash = await redis.get(CACHE_KEY)
@@ -111,19 +151,11 @@ async def notify_discord(bot, games, redis=None):
                 return
 
         except Exception as e:
-            logger.warning(f"Redis hash check failed: {e}")
+            logger.warning(f"Redis check failed: {e}")
 
+    # Memory check
     if _memory_last_hash == current_hash:
         logger.info("Duplicate skipped (Memory)")
-        return
-
-    # -------------------------
-    # CHANNELS (MULTI)
-    # -------------------------
-    channels = get_channels(bot)
-
-    if not channels:
-        logger.warning("No channels configured")
         return
 
     # -------------------------
@@ -132,62 +164,16 @@ async def notify_discord(bot, games, redis=None):
     grouped = group_by_platform(games)
 
     # -------------------------
-    # SEND TO ALL CHANNELS
+    # GET ALL GUILDS
     # -------------------------
-    for ch in channels:
+    guilds = bot.guilds
 
-        guild_id = ch.get("guild_id")
-        channel_id = ch.get("channel_id")
+    tasks = []
 
-        try:
-            channel = bot.get_channel(channel_id)
+    for guild in guilds:
+        tasks.append(process_guild(bot, guild, grouped))
 
-            if not channel:
-                channel = await bot.fetch_channel(channel_id)
-
-        except Exception as e:
-            logger.warning(
-                "Channel access failed",
-                extra={"extra_data": {"guild_id": guild_id, "error": str(e)}}
-            )
-            continue
-
-        # send grouped content
-        for platform, items in grouped.items():
-
-            embeds = []
-
-            for game in items:
-                try:
-                    embeds.append(build_embed(game))
-                except Exception as e:
-                    logger.warning(f"Embed build failed: {e}")
-
-            # chunk (max 10)
-            for i in range(0, len(embeds), 10):
-                chunk = embeds[i:i + 10]
-
-                try:
-                    await retry_async(lambda: channel.send(embeds=chunk))
-                except Exception as e:
-                    logger.error(
-                        "Send failed",
-                        extra={
-                            "extra_data": {
-                                "guild_id": guild_id,
-                                "error": str(e)
-                            }
-                        }
-                    )
-
-        # summary per guild
-        try:
-            summary = f"🔥 {len(games)} new free games!"
-
-            await retry_async(lambda: channel.send(summary))
-
-        except Exception as e:
-            logger.warning(f"Summary failed: {e}")
+    await asyncio.gather(*tasks, return_exceptions=True)
 
     # -------------------------
     # SAVE HASH
@@ -197,14 +183,62 @@ async def notify_discord(bot, games, redis=None):
             await redis.set(CACHE_KEY, current_hash)
         else:
             _memory_last_hash = current_hash
-
     except Exception as e:
         logger.warning(f"Hash save failed: {e}")
 
-    # -------------------------
-    # LOG
-    # -------------------------
     logger.info(
         "Games notified",
-        extra={"extra_data": {"count": len(games), "channels": len(channels)}}
+        extra={"count": len(games), "guilds": len(guilds)}
     )
+
+
+# ==================================================
+# PER GUILD PROCESSING
+# ==================================================
+async def process_guild(bot, guild, grouped):
+
+    try:
+        channel = await resolve_channel(bot, guild.id)
+
+        if not channel:
+            logger.warning(f"No channel for guild {guild.id}")
+            return
+
+        # -------------------------
+        # SEND PER PLATFORM
+        # -------------------------
+        for platform, games in grouped.items():
+
+            embeds = []
+
+            for game in games:
+                try:
+                    embeds.append(build_embed(game))
+                except Exception as e:
+                    logger.warning(f"Embed error: {e}")
+
+            # chunk
+            for i in range(0, len(embeds), 10):
+                chunk = embeds[i:i + 10]
+
+                await retry_async(lambda: channel.send(embeds=chunk))
+
+        # -------------------------
+        # SUMMARY
+        # -------------------------
+        summary = f"🔥 {sum(len(v) for v in grouped.values())} new free games!"
+
+        await retry_async(lambda: channel.send(summary))
+
+    except Exception as e:
+        logger.error(
+            "Guild processing failed",
+            extra={"guild_id": guild.id, "error": str(e)}
+        )
+
+
+# ==================================================
+# REGISTER EVENT HANDLER
+# ==================================================
+async def register_notifier():
+    await event_bus.subscribe("new_games", handle_new_games)
