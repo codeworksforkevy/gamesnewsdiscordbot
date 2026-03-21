@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 
 class TwitchMonitor:
 
-    LEADER_LOCK_ID = 987654321
-    LEADER_REDIS_KEY = "twitch-monitor:leader"
+    LEADER_LOCK_KEY = "twitch-monitor:leader"
+    LEADER_LOCK_TTL = 60
 
     def __init__(
         self,
@@ -30,39 +30,39 @@ class TwitchMonitor:
         self.metadata_cache = metadata_cache
         self.cooldown_manager = cooldown_manager
         self.change_classifier = change_classifier
-
         self.telemetry = telemetry
+
         self.interval = interval
 
         self.logger = logging.getLogger("twitch-monitor")
 
         self._running = False
+
         self.monitor_cycles_total = 0
         self.monitor_cycle_failures = 0
 
     # ==================================================
-    # LEADER LOCK (REDIS + DB FALLBACK)
+    # LEADER ELECTION
     # ==================================================
 
     async def acquire_leader_lock(self):
 
         try:
-            # Redis lock (multi-instance)
             if self.redis:
                 ok = await self.redis.set(
-                    self.LEADER_REDIS_KEY,
+                    self.LEADER_LOCK_KEY,
                     "1",
                     nx=True,
-                    ex=60
+                    ex=self.LEADER_LOCK_TTL
                 )
                 if ok:
                     return True
 
-            # DB fallback
+            # DB fallback (Postgres advisory lock)
             async with self.db_pool.acquire() as conn:
                 return await conn.fetchval(
                     "SELECT pg_try_advisory_lock($1);",
-                    self.LEADER_LOCK_ID
+                    987654321
                 )
 
         except Exception:
@@ -70,7 +70,7 @@ class TwitchMonitor:
             return False
 
     # ==================================================
-    # START
+    # START / STOP
     # ==================================================
 
     async def start(self):
@@ -79,7 +79,7 @@ class TwitchMonitor:
             return
 
         if not await self.acquire_leader_lock():
-            self.logger.info("Not leader — monitor disabled.")
+            self.logger.info("Not leader → monitor disabled")
             return
 
         self._running = True
@@ -97,7 +97,7 @@ class TwitchMonitor:
         self._running = False
 
     # ==================================================
-    # CYCLE
+    # MAIN CYCLE
     # ==================================================
 
     async def run_cycle(self):
@@ -127,7 +127,7 @@ class TwitchMonitor:
             self.logger.exception("Monitor cycle failed")
 
     # ==================================================
-    # EVENTSUB
+    # EVENTSUB SYNC
     # ==================================================
 
     async def audit_eventsub_subscriptions(self):
@@ -135,17 +135,17 @@ class TwitchMonitor:
         try:
             subs = await self.eventsub_manager.list_subscriptions()
 
-            active_ids = {
+            active = {
                 s.get("condition", {}).get("broadcaster_user_id")
                 for s in subs or []
                 if s.get("type") == "stream.online"
             }
 
             async with self.db_pool.acquire() as conn:
-                rows = await conn.fetch("SELECT broadcaster_id FROM streamers;")
+                rows = await conn.fetch("SELECT broadcaster_id FROM streamers")
 
             db_ids = {r["broadcaster_id"] for r in rows}
-            missing = db_ids - active_ids
+            missing = db_ids - active
 
             for bid in missing:
                 await self.eventsub_manager.subscribe_stream_online(
@@ -157,7 +157,7 @@ class TwitchMonitor:
             self.logger.exception("EventSub audit failed")
 
     # ==================================================
-    # LIVE STATE
+    # LIVE STATE RECONCILIATION
     # ==================================================
 
     async def reconcile_live_state(self):
@@ -170,20 +170,17 @@ class TwitchMonitor:
                     WHERE is_live = TRUE;
                 """)
 
-            broadcaster_ids = [r["broadcaster_id"] for r in rows]
+            ids = [r["broadcaster_id"] for r in rows]
 
-            if not broadcaster_ids:
+            if not ids:
                 return
 
-            live_ids = await self.twitch_api.check_streams_live(broadcaster_ids)
+            live_ids = await self.twitch_api.check_streams_live(ids)
 
             if not live_ids:
                 return
 
-            to_reset = [
-                bid for bid in broadcaster_ids
-                if bid not in live_ids
-            ]
+            to_reset = [bid for bid in ids if bid not in live_ids]
 
             if not to_reset:
                 return
@@ -199,7 +196,7 @@ class TwitchMonitor:
             self.logger.exception("Live reconciliation failed")
 
     # ==================================================
-    # 🔥 STREAM TRACKING (FULL PIPELINE)
+    # STREAM CHANGE TRACKING
     # ==================================================
 
     async def track_stream_changes(self):
@@ -220,35 +217,35 @@ class TwitchMonitor:
                 if not current:
                     continue
 
-                prev = await self.metadata_cache.get(bid)
+                prev = None
 
-                # First time cache
+                if self.metadata_cache:
+                    prev = await self.metadata_cache.get(bid)
+
                 if not prev:
-                    await self.metadata_cache.set(bid, current)
+                    if self.metadata_cache:
+                        await self.metadata_cache.set(bid, current)
                     continue
 
-                # No change
                 if not self._has_changed(prev, current):
                     continue
 
-                # 🔥 classify change
                 change_type = (
                     self.change_classifier.classify(prev, current)
                     if self.change_classifier else "unknown"
                 )
 
-                # 🔥 cooldown check
+                # cooldown
                 if self.cooldown_manager:
-                    if not self.cooldown_manager.should_send(
-                        f"{bid}:{change_type}",
-                        cooldown=300
-                    ):
+                    key = f"{bid}:{change_type}"
+
+                    if not self.cooldown_manager.should_send(key, cooldown=300):
                         continue
 
                 # update cache
-                await self.metadata_cache.set(bid, current)
+                if self.metadata_cache:
+                    await self.metadata_cache.set(bid, current)
 
-                # notify
                 await self.notify_stream_change(
                     bid,
                     prev,
@@ -260,7 +257,7 @@ class TwitchMonitor:
             self.logger.exception("Stream tracking failed")
 
     # ==================================================
-    # DIFF
+    # DIFF LOGIC
     # ==================================================
 
     def _has_changed(self, old, new):
@@ -271,7 +268,7 @@ class TwitchMonitor:
         )
 
     # ==================================================
-    # NOTIFICATION
+    # NOTIFIER
     # ==================================================
 
     async def notify_stream_change(self, broadcaster_id, old, new, change_type):
@@ -280,8 +277,6 @@ class TwitchMonitor:
             "Stream changed",
             extra={"extra_data": {
                 "broadcaster": broadcaster_id,
-                "old": old,
-                "new": new,
                 "type": change_type
             }}
         )
