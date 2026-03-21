@@ -105,10 +105,7 @@ bot.logger = logger
 
 @bot.event
 async def on_ready():
-    logger.info(
-        "Bot ready",
-        extra={"extra_data": {"user": str(bot.user)}}
-    )
+    logger.info("Bot ready", extra={"extra_data": {"user": str(bot.user)}})
 
     try:
         await startup_sync(bot)
@@ -117,10 +114,7 @@ async def on_ready():
 
     try:
         synced = await bot.tree.sync()
-        logger.info(
-            "Slash synced",
-            extra={"extra_data": {"count": len(synced)}}
-        )
+        logger.info("Slash synced", extra={"extra_data": {"count": len(synced)}})
     except Exception as e:
         logger.exception(f"Slash sync failed: {e}")
 
@@ -146,7 +140,6 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
         )
 
     app = await eventsub_server.create_app(bot, app_state)
-
     app.state.bot = bot
 
     app.router.add_get("/", health)
@@ -156,17 +149,16 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
     await runner.setup()
 
     port = int(os.getenv("PORT", "8080"))
-
     site = web.TCPSite(runner, "0.0.0.0", port)
+
     await site.start()
 
     logger.info("Web server started", extra={"extra_data": {"port": port}})
-
     return runner
 
 
 # ==================================================
-# FREE GAME LOOP
+# LOOP
 # ==================================================
 
 async def free_games_loop(session):
@@ -190,7 +182,6 @@ async def main():
     # DB
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
-
     logger.info("Database connected")
 
     # CACHE
@@ -198,14 +189,11 @@ async def main():
 
     async with ClientSession() as session:
 
-        # TWITCH API
+        # Twitch API
         from services.twitch_api import init_twitch_api
         app_state.twitch_api = await init_twitch_api()
 
-        # ==================================================
-        # EVENTSUB MANAGER (FIXED)
-        # ==================================================
-
+        # EventSub Manager
         from services.eventsub_manager import EventSubManager
 
         app_state.eventsub_manager = EventSubManager(
@@ -217,10 +205,7 @@ async def main():
         # attach bot
         eventsub_server.bot_instance = bot
 
-        # ==================================================
         # COMMANDS
-        # ==================================================
-
         register_live_commands(bot)
         await register_discounts(bot, session)
         await register_free_games(bot, session)
@@ -229,10 +214,7 @@ async def main():
         await register_utilities(bot)
         await register_help(bot)
 
-        # ==================================================
         # TASKS
-        # ==================================================
-
         free_task = asyncio.create_task(free_games_loop(session))
 
         from services.monitor import TwitchMonitor
@@ -250,7 +232,6 @@ async def main():
 
         # signals
         loop = asyncio.get_running_loop()
-
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, shutdown_event.set)
 
