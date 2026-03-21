@@ -85,7 +85,10 @@ from commands.free_games import register as register_free_games
 from commands.membership import register as register_membership
 from commands.twitch_badges import register as register_twitch_badges
 from commands.utilities.register import register_utilities
-from commands.help import register as register_help   # ✅ NEW
+from commands.help import register as register_help
+
+# 🔥 IMPORTANT
+from services import eventsub_server
 
 
 # ==================================================
@@ -163,7 +166,7 @@ monitor_cycle_failures {m['monitor_cycle_failures']}
 
 
 # ==================================================
-# FREE GAME SCHEDULER
+# FREE GAME LOOP
 # ==================================================
 
 async def free_games_loop(session):
@@ -171,7 +174,6 @@ async def free_games_loop(session):
     while True:
         try:
             await update_free_games_cache(session)
-
         except Exception as e:
             logger.error(
                 "Free games update failed",
@@ -195,6 +197,7 @@ async def main():
 
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
+
     logger.info("Database connected")
 
     pool = app_state.db.get_pool()
@@ -215,8 +218,11 @@ async def main():
         app_state.twitch_api = TwitchAPI(session)
         app_state.eventsub_manager = EventSubManager(session)
 
+        # 🔥 EventSub bot injection (CRITICAL)
+        eventsub_server.bot_instance = bot
+
         # -------------------------------------------------
-        # REGISTER COMMANDS
+        # COMMANDS
         # -------------------------------------------------
 
         register_live_commands(bot)
@@ -225,7 +231,7 @@ async def main():
         await register_membership(bot, session)
         await register_twitch_badges(bot, session)
         await register_utilities(bot)
-        await register_help(bot)   # ✅ NEW
+        await register_help(bot)
 
         # -------------------------------------------------
         # BACKGROUND TASKS
@@ -257,10 +263,11 @@ async def main():
         )
 
         # -------------------------------------------------
-        # SIGNAL HANDLING
+        # SIGNALS
         # -------------------------------------------------
 
         loop = asyncio.get_running_loop()
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, shutdown_event.set)
 
@@ -273,10 +280,11 @@ async def main():
         # -------------------------------------------------
 
         await shutdown_event.wait()
+
         logger.info("Shutdown signal received")
 
         # -------------------------------------------------
-        # CLEAN SHUTDOWN
+        # CLEANUP
         # -------------------------------------------------
 
         for task in (free_task, monitor_task, bot_task):
