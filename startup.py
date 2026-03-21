@@ -1,5 +1,6 @@
 import discord
 import logging
+import asyncio
 
 logger = logging.getLogger("startup")
 
@@ -10,18 +11,27 @@ logger = logging.getLogger("startup")
 
 async def ensure_live_role(guild: discord.Guild):
 
+    # "Live" rolünü bul
     role = discord.utils.get(guild.roles, name="Live")
 
     if role:
         return role
 
-    logger.info("Creating Live role in %s", guild.name)
+    logger.info(f"Creating Live role in {guild.name}")
 
-    return await guild.create_role(
-        name="Live",
-        color=discord.Color.from_rgb(137, 207, 240),  # Baby Blue
-        mentionable=True
-    )
+    try:
+        return await guild.create_role(
+            name="Live",
+            color=discord.Color.from_rgb(137, 207, 240),  # Baby Blue
+            mentionable=True
+        )
+
+    except discord.Forbidden:
+        logger.error(f"Missing permissions to create role in {guild.name}")
+    except Exception as e:
+        logger.error(f"Role creation error in {guild.name}: {e}")
+
+    return None
 
 
 # ==================================================
@@ -30,32 +40,50 @@ async def ensure_live_role(guild: discord.Guild):
 
 async def startup_sync(bot):
 
+    logger.info("🚀 Startup sync started")
+
     db = bot.app_state.db
     eventsub = bot.app_state.eventsub_manager
 
-    logger.info("Running startup sync...")
+    # Guild'leri yükle (cache warm-up)
+    await asyncio.gather(*[guild.chunk() for guild in bot.guilds])
 
-    # 🔹 Tüm guild'ler
     for guild in bot.guilds:
 
-        # 1. Live role
-        await ensure_live_role(guild)
+        try:
+            # 1. LIVE ROLE garanti
+            live_role = await ensure_live_role(guild)
 
-        # 2. DB streamer'ları çek
-        streamers = await db.fetch(
-            "SELECT streamer_id FROM streamers WHERE guild_id=$1",
-            guild.id
-        )
+            # 2. DB streamer'ları çek
+            streamers = await db.fetch(
+                "SELECT twitch_user_id, twitch_login FROM streamers WHERE guild_id=$1",
+                guild.id
+            )
 
-        for s in streamers:
+            logger.info(f"{guild.name} → {len(streamers)} streamer found")
 
-            broadcaster_id = s["streamer_id"]
+            # 3. EventSub tekrar subscribe et
+            for s in streamers:
 
-            try:
-                # 3. EventSub tekrar kur
-                await eventsub.subscribe_all(broadcaster_id)
+                broadcaster_id = s["twitch_user_id"]
+                twitch_login = s["twitch_login"]
 
-            except Exception as e:
-                logger.error("Startup subscription failed: %s", e)
+                try:
+                    await eventsub.subscribe_stream_online(
+                        broadcaster_id,
+                        bot.app_state.webhook_url
+                    )
 
-    logger.info("Startup sync completed.")
+                    logger.info(f"Subscribed: {twitch_login}")
+
+                except Exception as e:
+                    logger.error(f"Subscription failed ({twitch_login}): {e}")
+
+            # 4. Live role cache (opsiyonel future use)
+            if live_role:
+                bot.app_state.live_roles[guild.id] = live_role.id
+
+        except Exception as e:
+            logger.error(f"Startup error in guild {guild.id}: {e}")
+
+    logger.info("✅ Startup sync completed")
