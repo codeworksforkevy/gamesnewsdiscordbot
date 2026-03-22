@@ -1,56 +1,40 @@
 import discord
 from discord import app_commands
-import asyncpg
-import os
 import aiohttp
-import traceback
+import logging
+
+logger = logging.getLogger("live")
+
+TWITCH_URL = "https://api.twitch.tv/helix/users"
 
 
-async def register_live_commands(bot, app_state):
+async def register(bot, app_state):
 
-    # -------------------------------------------------
-    # DATABASE
-    # -------------------------------------------------
-    async def get_conn():
-        return await asyncpg.connect(os.getenv("DATABASE_URL"))
-
-    # -------------------------------------------------
+    # ==================================================
     # ADD STREAMER
-    # -------------------------------------------------
-    @bot.tree.command(name="add_streamer")
+    # ==================================================
+    @bot.tree.command(name="live_add", description="Add a streamer")
     async def add_streamer(
         interaction: discord.Interaction,
         twitch_login: str
     ):
         await interaction.response.defer(ephemeral=True)
 
-        # Guild kontrolü
-        if interaction.guild is None:
-            return await interaction.followup.send(
-                "❌ This command can only be used in a server.",
-                ephemeral=True
-            )
-
-        conn = None
-
         try:
-            conn = await get_conn()
-
             headers = {
-                "Client-ID": os.getenv("TWITCH_CLIENT_ID"),
-                "Authorization": f"Bearer {os.getenv('TWITCH_APP_TOKEN')}"
+                "Client-ID": app_state.config["TWITCH_CLIENT_ID"],
+                "Authorization": f"Bearer {app_state.config['TWITCH_APP_TOKEN']}"
             }
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"https://api.twitch.tv/helix/users?login={twitch_login}",
+                    f"{TWITCH_URL}?login={twitch_login}",
                     headers=headers
                 ) as resp:
 
-                    # HTTP kontrol
                     if resp.status != 200:
                         return await interaction.followup.send(
-                            f"❌ Twitch API error: {resp.status}",
+                            "❌ Twitch API error",
                             ephemeral=True
                         )
 
@@ -65,45 +49,69 @@ async def register_live_commands(bot, app_state):
             user = data["data"][0]
             twitch_user_id = user["id"]
 
-            # DB insert
-            await conn.execute(
+            await app_state.db.execute(
                 """
                 INSERT INTO streamers (twitch_user_id, twitch_login, guild_id)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (twitch_user_id) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 twitch_user_id,
                 twitch_login,
                 interaction.guild.id
             )
 
-            # EventSub subscription (SAFE)
-            if hasattr(app_state, "eventsub_manager"):
-                await app_state.eventsub_manager.subscribe_stream_online(
-                    twitch_user_id,
-                    os.getenv("WEBHOOK_URL")
-                )
-
             await interaction.followup.send(
-                f"✅ Streamer added: {twitch_login}",
+                f"✅ Added: {twitch_login}",
                 ephemeral=True
             )
 
         except Exception as e:
-            print("ADD_STREAMER ERROR:", e)
-            traceback.print_exc()
+            logger.exception("add_streamer failed")
 
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    "❌ Unexpected error occurred.",
+            await interaction.followup.send(
+                "❌ Internal error",
+                ephemeral=True
+            )
+
+    # ==================================================
+    # LIST STREAMERS
+    # ==================================================
+    @bot.tree.command(name="live_list", description="List streamers")
+    async def list_streamers(interaction: discord.Interaction):
+
+        try:
+            rows = await app_state.db.fetch(
+                """
+                SELECT twitch_login
+                FROM streamers
+                WHERE guild_id=$1
+                """,
+                interaction.guild.id
+            )
+
+            if not rows:
+                return await interaction.response.send_message(
+                    "No streamers added.",
                     ephemeral=True
                 )
-            else:
-                await interaction.response.send_message(
-                    "❌ Unexpected error occurred.",
-                    ephemeral=True
-                )
 
-        finally:
-            if conn:
-                await conn.close()
+            text = "\n".join([f"• {r['twitch_login']}" for r in rows])
+
+            embed = discord.Embed(
+                title="📡 Tracked Streamers",
+                description=text,
+                color=0x9146FF
+            )
+
+            await interaction.response.send_message(
+                embed=embed,
+                ephemeral=True
+            )
+
+        except Exception:
+            logger.exception("list_streamers failed")
+
+            await interaction.response.send_message(
+                "❌ Failed to fetch streamers",
+                ephemeral=True
+            )
