@@ -26,7 +26,7 @@ if not DATABASE_URL:
 
 
 # ==================================================
-# LOGGING
+# LOGGING (RAILWAY SAFE)
 # ==================================================
 
 class JsonFormatter(logging.Formatter):
@@ -56,34 +56,30 @@ logger = logging.getLogger("bot")
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
-intents.message_content = True
+intents.message_content = True  # FIXED
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 # ==================================================
-# IMPORTS
+# IMPORTS (CORE ONLY)
 # ==================================================
 
 from services.db import Database
 from services.state import AppState
 from services.cache import CacheManager
-from services.fetch_router import FetchRouter
-
-from services.free_games_service import update_free_games_cache, init_cache
 from services.redis_client import RedisClient
+
+from services.free_games_service import (
+    update_free_games_cache,
+    init_cache
+)
 
 from startup import startup_sync
 
-# ⚠️ IMPORTANT: register_live_commands artık app_state alıyor
-from commands.live_commands import register_live_commands
-
-from commands.discounts import register as register_discounts
-from commands.free_games import register as register_free_games
-from commands.membership import register as register_membership
-from commands.twitch_badges import register as register_twitch_badges
-from commands.utilities.register import register_utilities
-from commands.help import register as register_help
+# ✅ NEW SYSTEM
+from core.command_loader import load_all_commands
+from core.event_bus import event_bus
 
 from services.webhook import create_webhook_app
 from services import eventsub_server
@@ -99,10 +95,27 @@ bot.logger = logger
 
 
 # ==================================================
+# EVENT BUS HOOKS
+# ==================================================
+
+async def setup_event_handlers():
+    """
+    Event-driven notifier binding
+    """
+
+    from services.notifier import notify_discord
+
+    async def handle_free_games(games):
+        await notify_discord(bot, games, redis=app_state.cache)
+
+    event_bus.subscribe("free_games_fetched", handle_free_games)
+
+
+# ==================================================
 # FREE GAME LOOP
 # ==================================================
 
-async def free_games_loop(session, bot, cache):
+async def free_games_loop(session, cache):
 
     while True:
         try:
@@ -111,10 +124,13 @@ async def free_games_loop(session, bot, cache):
             if cache and await cache.is_duplicate(key):
                 logger.info("Duplicate fetch skipped")
             else:
-                await update_free_games_cache(session, bot=bot, redis=cache)
+                await update_free_games_cache(
+                    session,
+                    redis=cache
+                )
 
         except Exception as e:
-            logger.error(str(e))
+            logger.error(f"Free game loop error: {e}")
 
         await asyncio.sleep(1800)
 
@@ -143,6 +159,8 @@ async def start_web_server(bot, app_state):
 
     await site.start()
 
+    logger.info(f"Web server started on {port}")
+
     return runner
 
 
@@ -160,11 +178,12 @@ async def main():
     app_state.db = Database(DATABASE_URL)
     await app_state.db.connect()
 
+    logger.info("Database connected")
+
     # -------------------------
-    # REDIS
+    # REDIS + CACHE
     # -------------------------
     cache = None
-    redis_client = None
 
     if REDIS_URL:
         try:
@@ -172,7 +191,7 @@ async def main():
 
             raw = redis.from_url(REDIS_URL)
 
-            redis_client = RedisClient(raw)
+            app_state.redis = RedisClient(raw)
             cache = CacheManager(raw)
 
             await init_cache(raw)
@@ -182,14 +201,14 @@ async def main():
         except Exception as e:
             logger.warning(f"Redis fallback: {e}")
 
+    app_state.cache = cache
+
     # -------------------------
     # HTTP SESSION
     # -------------------------
     timeout = ClientTimeout(total=15)
 
     async with ClientSession(timeout=timeout) as session:
-
-        app_state.cache = cache
 
         # -------------------------
         # SERVICES
@@ -198,29 +217,34 @@ async def main():
         app_state.twitch_api = twitch_api.TwitchAPI(session)
 
         # -------------------------
-        # COMMANDS (REGISTRATION ORDER FIXED)
+        # EVENT BUS
         # -------------------------
-
-        # ⚠️ FIX: live commands now needs app_state
-        await register_live_commands(bot, app_state)
-
-        # async olanlar await edilmeli
-        await register_discounts(bot, session)
-        await register_free_games(bot, session)
-        await register_membership(bot, session)
-        await register_twitch_badges(bot, session)
-        await register_utilities(bot)
-        await register_help(bot)
+        await setup_event_handlers()
 
         # -------------------------
-        # LOOP
+        # AUTO COMMAND LOADER ✅
+        # -------------------------
+        await load_all_commands(bot, app_state, session)
+
+        logger.info("All commands loaded")
+
+        # -------------------------
+        # STARTUP SYNC
+        # -------------------------
+        try:
+            await startup_sync(bot)
+        except Exception as e:
+            logger.error(f"Startup sync failed: {e}")
+
+        # -------------------------
+        # BACKGROUND TASKS
         # -------------------------
         free_task = asyncio.create_task(
-            free_games_loop(session, bot, cache)
+            free_games_loop(session, cache)
         )
 
         # -------------------------
-        # WEB
+        # WEB SERVER
         # -------------------------
         runner = await start_web_server(bot, app_state)
 
@@ -245,6 +269,8 @@ async def main():
 
         await shutdown_event.wait()
 
+        logger.info("Shutdown signal received")
+
         # -------------------------
         # CLEANUP
         # -------------------------
@@ -265,7 +291,9 @@ async def main():
         logger.info("Shutdown complete")
 
 
+# ==================================================
 # ENTRY
+# ==================================================
 
 if __name__ == "__main__":
     asyncio.run(main())
