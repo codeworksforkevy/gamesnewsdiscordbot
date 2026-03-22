@@ -1,26 +1,65 @@
+# core/command_loader.py
+
+import os
 import importlib
-import pkgutil
-import inspect
 import logging
 
-logger = logging.getLogger("loader")
+logger = logging.getLogger("command-loader")
 
-async def load_commands(bot, app_state):
-    from commands import __path__ as commands_path
 
-    for _, module_name, _ in pkgutil.iter_modules(commands_path):
-        full_name = f"commands.{module_name}"
+async def load_all_commands(bot, app_state, session):
+    """
+    Auto-load all commands from /commands folder
+
+    Expected structure:
+    commands/
+        x.py → async def register(bot, app_state, session)
+    """
+
+    commands_path = "commands"
+
+    loaded = 0
+    failed = 0
+
+    for filename in os.listdir(commands_path):
+
+        # skip non-python files
+        if not filename.endswith(".py") or filename.startswith("_"):
+            continue
+
+        module_name = f"{commands_path}.{filename[:-3]}"
+
         try:
-            module = importlib.import_module(full_name)
-            register_fn = getattr(module, "register", None)
-            if not register_fn:
+            module = importlib.import_module(module_name)
+
+            # must have register()
+            if not hasattr(module, "register"):
+                logger.warning(f"{module_name} missing register()")
                 continue
-            if inspect.iscoroutinefunction(register_fn):
-                await register_fn(bot, app_state)
-            else:
-                register_fn(bot, app_state)
-            app_state.registry.register(module_name, full_name)
-            logger.info(f"Loaded: {module_name}")
+
+            register_func = getattr(module, "register")
+
+            # async register
+            await register_func(bot, app_state, session)
+
+            loaded += 1
+
+            logger.info(f"Loaded command module: {module_name}")
+
         except Exception as e:
-            app_state.registry.register_error(full_name, e)
-            logger.exception(f"Failed: {module_name}")
+            failed += 1
+
+            logger.error(
+                f"Command load failed: {module_name}",
+                extra={"extra_data": {"error": str(e)}}
+            )
+
+    logger.info(
+        "Command loading complete",
+        extra={
+            "extra_data": {
+                "loaded": loaded,
+                "failed": failed
+            }
+        }
+    )
