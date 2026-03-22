@@ -2,32 +2,29 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 
 logger = logging.getLogger("twitch-monitor")
 
 
 class TwitchMonitor:
-    def __init__(self, bot, session, redis=None, interval=300):
+
+    def __init__(self, bot, app_state, interval=60):
         self.bot = bot
-        self.session = session
-        self.redis = redis
-
+        self.app_state = app_state
         self.interval = interval
-        self._task = None
-        self._running = False
 
-        # fallback memory cache (redis yoksa)
-        self._seen_events = set()
+        self._running = False
+        self._task = None
 
     # ==================================================
     # START / STOP
     # ==================================================
 
     def start(self):
-        if not self._task:
+        if not self._running:
             self._running = True
-            self._task = asyncio.create_task(self._run())
+            self._task = asyncio.create_task(self._loop())
             logger.info("TwitchMonitor started")
 
     def stop(self):
@@ -39,12 +36,12 @@ class TwitchMonitor:
     # MAIN LOOP
     # ==================================================
 
-    async def _run(self):
+    async def _loop(self):
         while self._running:
             try:
-                await self.check_drops()
+                await self.check_streams()
             except Exception as e:
-                logger.exception("Twitch monitor loop failed", extra={"error": str(e)})
+                logger.error(f"Monitor error: {e}")
 
             await asyncio.sleep(self.interval)
 
@@ -52,68 +49,87 @@ class TwitchMonitor:
     # CORE LOGIC
     # ==================================================
 
-    async def check_drops(self):
+    async def check_streams(self):
 
-        drops = await self.fetch_drops()
+        db = self.app_state.db
+        twitch_api = self.app_state.twitch_api
 
-        for drop in drops:
-            key = f"twitch_drop:{drop['id']}"
+        rows = await db.fetch(
+            """
+            SELECT twitch_user_id, twitch_login
+            FROM streamers
+            """
+        )
 
-            if await self._is_duplicate(key):
-                continue
+        for row in rows:
+            user_id = row["twitch_user_id"]
+            login = row["twitch_login"]
 
-            await self._mark_seen(key)
-
-            await self.dispatch_drop(drop)
-
-    # ==================================================
-    # FETCH (stub - senin mevcut fetch logic bağlanacak)
-    # ==================================================
-
-    async def fetch_drops(self):
-        """
-        Bunu kendi twitch_drops fetch fonksiyonuna bağla
-        """
-        return []
-
-    # ==================================================
-    # DUPLICATE CONTROL
-    # ==================================================
-
-    async def _is_duplicate(self, key):
-
-        # Redis varsa
-        if self.redis:
             try:
-                val = await self.redis.get(key)
-                return val is not None
-            except Exception:
-                pass
+                stream = await twitch_api.get_stream(user_id)
 
-        # fallback memory
-        return key in self._seen_events
+                # =========================
+                # LOAD PREVIOUS STATE
+                # =========================
+                prev = await db.fetchrow(
+                    """
+                    SELECT is_live
+                    FROM streamer_states
+                    WHERE twitch_user_id = $1
+                    """,
+                    user_id
+                )
 
-    async def _mark_seen(self, key):
+                was_live = prev["is_live"] if prev else False
+                is_live = bool(stream)
 
-        if self.redis:
-            try:
-                await self.redis.set(key, "1", ttl=3600)
-                return
-            except Exception:
-                pass
+                # =========================
+                # STATE CHANGE DETECTED
+                # =========================
+                if not was_live and is_live:
 
-        self._seen_events.add(key)
+                    logger.info(f"{login} went LIVE")
+
+                    await self.handle_stream_online(user_id, login, stream)
+
+                # =========================
+                # UPDATE STATE
+                # =========================
+                await db.execute(
+                    """
+                    INSERT INTO streamer_states (
+                        twitch_user_id, is_live, title, game_name, viewer_count, last_updated
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (twitch_user_id)
+                    DO UPDATE SET
+                        is_live = EXCLUDED.is_live,
+                        title = EXCLUDED.title,
+                        game_name = EXCLUDED.game_name,
+                        viewer_count = EXCLUDED.viewer_count,
+                        last_updated = EXCLUDED.last_updated
+                    """,
+                    user_id,
+                    is_live,
+                    stream.get("title") if stream else None,
+                    stream.get("game_name") if stream else None,
+                    stream.get("viewer_count") if stream else None,
+                    datetime.now(timezone.utc)
+                )
+
+            except Exception as e:
+                logger.warning(f"Streamer check failed: {login} → {e}")
 
     # ==================================================
-    # DISPATCH
+    # EVENT EMIT
     # ==================================================
 
-    async def dispatch_drop(self, drop):
-        try:
-            logger.info(f"New Twitch Drop: {drop.get('title')}")
+    async def handle_stream_online(self, user_id, login, stream):
 
-            # burada Discord gönderimi yapılır
-            # örn: await channel.send(...)
+        from core.event_bus import event_bus
 
-        except Exception as e:
-            logger.warning("Drop dispatch failed", extra={"error": str(e)})
+        await event_bus.emit("stream_online", {
+            "twitch_user_id": user_id,
+            "twitch_login": login,
+            "stream": stream
+        })
