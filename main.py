@@ -11,7 +11,7 @@ import discord
 from discord.ext import commands
 
 # ==================================================
-# ENV — fail fast if critical vars are missing
+# ENV
 # ==================================================
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -20,13 +20,12 @@ REDIS_URL     = os.getenv("REDIS_URL")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is not set in environment variables")
-
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set in environment variables")
 
 
 # ==================================================
-# LOGGING — Railway-safe structured JSON logs
+# LOGGING
 # ==================================================
 
 class JsonFormatter(logging.Formatter):
@@ -40,22 +39,20 @@ class JsonFormatter(logging.Formatter):
 
 _handler = logging.StreamHandler()
 _handler.setFormatter(JsonFormatter())
-
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 root_logger.handlers.clear()
 root_logger.addHandler(_handler)
-
 logger = logging.getLogger("bot")
 
 
 # ==================================================
-# BOT — intents
+# BOT
 # ==================================================
 
 intents = discord.Intents.default()
-intents.guilds         = True
-intents.members        = True
+intents.guilds          = True
+intents.members         = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -71,9 +68,9 @@ from services.cache import CacheManager
 from services.redis_client import RedisClient
 
 from services.free_games_service import update_free_games_cache, init_cache
-from services.luna_poster  import luna_poster_loop
-from services.steam_poster import steam_poster_loop
-from services.notifier     import register_notifier
+from services.luna_poster        import luna_poster_loop
+from services.steam_poster       import steam_poster_loop
+from services.notifier           import register_notifier
 
 from startup import startup_sync
 
@@ -83,20 +80,20 @@ from core.event_bus      import event_bus
 from services.webhook import create_webhook_app
 from services import eventsub_server
 
-
-# ==================================================
-# APP STATE — shared across the whole bot
-# ==================================================
-
-app_state      = AppState()
-bot.app_state  = app_state
-bot.logger     = logger
+import db.guild_settings as guild_settings_module
 
 
 # ==================================================
-# EVENT BUS — wire notifier to free_games_fetched
-# FIX: was importing notify_discord which didn't exist.
-# register_notifier() subscribes handle_free_games correctly.
+# APP STATE
+# ==================================================
+
+app_state     = AppState()
+bot.app_state = app_state
+bot.logger    = logger
+
+
+# ==================================================
+# EVENT BUS
 # ==================================================
 
 def setup_event_handlers() -> None:
@@ -106,16 +103,13 @@ def setup_event_handlers() -> None:
 
 # ==================================================
 # FREE GAMES LOOP
-# FIX 1: waits for bot + DB to be ready before first fetch
-#         (prevents "DB pool not initialized" race condition)
-# FIX 2: exponential backoff on errors instead of flat 30 min wait
 # ==================================================
 
 async def free_games_loop(session, cache) -> None:
 
-    POLL_INTERVAL = 1800   # 30 min between successful fetches
-    ERROR_BASE    = 30     # first retry after 30s
-    ERROR_MAX     = 300    # cap at 5 min
+    POLL_INTERVAL = 1800
+    ERROR_BASE    = 30
+    ERROR_MAX     = 300
 
     logger.info("Free games loop: waiting for bot to be ready...")
     await bot.wait_until_ready()
@@ -128,26 +122,21 @@ async def free_games_loop(session, cache) -> None:
             await update_free_games_cache(session, redis=cache)
             error_count = 0
             await asyncio.sleep(POLL_INTERVAL)
-
         except asyncio.CancelledError:
-            logger.info("Free games loop cancelled — shutting down")
+            logger.info("Free games loop cancelled")
             break
-
         except Exception as e:
             error_count += 1
             backoff = min(ERROR_BASE * (2 ** (error_count - 1)), ERROR_MAX)
             logger.error(
-                f"Free games loop error #{error_count}: {e} "
-                f"— retrying in {backoff}s"
+                f"Free games loop error #{error_count}: {e} — retrying in {backoff}s"
             )
             await asyncio.sleep(backoff)
 
 
 # ==================================================
-# ON READY — runs after Discord gateway connects
-# FIX: startup_sync was being called before bot.start()
-#      so bot.guilds was always empty. Moving it here
-#      guarantees the guild list is populated.
+# ON READY
+# FIX: startup_sync moved here so bot.guilds is populated.
 # ==================================================
 
 @bot.event
@@ -155,40 +144,37 @@ async def on_ready():
     logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     logger.info(f"Connected to {len(bot.guilds)} guild(s)")
 
-    # Sync slash commands to Discord
     try:
         synced = await bot.tree.sync()
         logger.info(f"Slash commands synced: {len(synced)} command(s)")
     except Exception as e:
         logger.error(f"Slash command sync failed: {e}")
 
-    # Run startup sync now that guilds are available
     try:
         await startup_sync(bot)
     except Exception as e:
-        logger.error(f"Startup sync failed: {e}")
+        logger.error(f"Startup sync failed: {e}", exc_info=True)
 
-    # Mark app_state ready so background loops can proceed
     app_state.mark_ready()
     logger.info("Bot is fully ready")
 
 
 # ==================================================
-# WEB SERVER — health check + EventSub + webhook
+# WEB SERVER
+# FIX: app_state.is_ready is a bool not a callable
 # ==================================================
 
 async def start_web_server(bot, app_state):
 
     webhook_app = await create_webhook_app(bot, app_state)
     main_app    = await eventsub_server.create_app(bot, app_state)
-
     main_app.add_subapp("/webhook", webhook_app)
 
     async def health(_):
         return web.json_response({
             "status": "ok",
             "guilds": len(bot.guilds),
-            "ready":  app_state.is_ready(),
+            "ready":  app_state.is_ready,
         })
 
     main_app.router.add_get("/", health)
@@ -217,29 +203,26 @@ async def main():
     await app_state.db.connect()
     logger.info("Database connected")
 
-    # ── Redis ─────────────────────────────────────────────────────────────
-    # FIX: ping Redis after connecting to verify it's actually reachable.
-    # Previously logged "Redis enabled" even when connection was broken.
+    # FIX: wire guild_settings to the same DB instance.
+    # Previously it used a separate singleton (core/state_manager.py)
+    # that was never populated — causing "DB pool not initialized" on
+    # every guild during startup_sync and in the notifier.
+    guild_settings_module.set_db(app_state.db)
+
+    # ── Redis ──────────────────────────────────────────────────────────────
     cache = None
 
     if REDIS_URL:
         try:
             import redis.asyncio as aioredis
-
             raw_redis       = aioredis.from_url(REDIS_URL)
             app_state.redis = RedisClient(raw_redis)
             cache           = CacheManager(raw_redis)
-
-            # Verify connection before declaring success
             await raw_redis.ping()
             await init_cache(raw_redis)
-
             logger.info("Redis connected successfully")
-
         except Exception as e:
-            logger.warning(
-                f"Redis unavailable — falling back to memory cache: {e}"
-            )
+            logger.warning(f"Redis unavailable — falling back to memory cache: {e}")
             cache = None
 
     app_state.cache = cache
@@ -249,43 +232,30 @@ async def main():
 
     async with ClientSession(timeout=timeout) as session:
 
-        # ── Twitch API ─────────────────────────────────────────────────────
         from services.twitch_api import TwitchAPI
         app_state.twitch_api = TwitchAPI(session)
 
-        # ── Event bus ─────────────────────────────────────────────────────
         setup_event_handlers()
 
-        # ── Command loader ─────────────────────────────────────────────────
         await load_all_commands(bot, app_state, session)
         logger.info("All commands loaded")
 
-        # ── Background tasks ───────────────────────────────────────────────
-        # All three loops call bot.wait_until_ready() internally so they
-        # won't touch the DB or Discord until the gateway is connected.
         free_task  = asyncio.create_task(
-            free_games_loop(session, cache),
-            name="free-games-loop",
+            free_games_loop(session, cache), name="free-games-loop"
         )
         luna_task  = asyncio.create_task(
-            luna_poster_loop(bot, session, cache),
-            name="luna-poster-loop",
+            luna_poster_loop(bot, session, cache), name="luna-poster-loop"
         )
         steam_task = asyncio.create_task(
-            steam_poster_loop(bot, session, cache),
-            name="steam-poster-loop",
+            steam_poster_loop(bot, session, cache), name="steam-poster-loop"
         )
 
-        # ── Web server ─────────────────────────────────────────────────────
         runner = await start_web_server(bot, app_state)
 
-        # ── Bot start ──────────────────────────────────────────────────────
         bot_task = asyncio.create_task(
-            bot.start(DISCORD_TOKEN),
-            name="discord-bot",
+            bot.start(DISCORD_TOKEN), name="discord-bot"
         )
 
-        # ── Signal handling ────────────────────────────────────────────────
         loop = asyncio.get_running_loop()
 
         def _shutdown():
@@ -296,32 +266,24 @@ async def main():
             try:
                 loop.add_signal_handler(sig, _shutdown)
             except NotImplementedError:
-                # Windows doesn't support add_signal_handler
                 pass
 
         await shutdown_event.wait()
 
-        # ── Cleanup ────────────────────────────────────────────────────────
         logger.info("Shutting down...")
-
         free_task.cancel()
         luna_task.cancel()
         steam_task.cancel()
         bot_task.cancel()
 
         await asyncio.gather(
-            free_task,
-            luna_task,
-            steam_task,
-            bot_task,
+            free_task, luna_task, steam_task, bot_task,
             return_exceptions=True,
         )
 
         await runner.cleanup()
-
         if app_state.db:
             await app_state.db.close()
-
         logger.info("Shutdown complete")
 
 
