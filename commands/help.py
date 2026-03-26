@@ -1,100 +1,172 @@
+# commands/help.py
+#
+# UX: Dutch/English language toggle button.
+# Embed starts in English. A button swaps to Dutch (and back).
+# Half the length, twice as clean.
+
 import discord
 from discord import app_commands
 
 
-async def register(bot, app_state, session):
+# ==================================================
+# EMBED BUILDERS
+# ==================================================
 
-    @bot.tree.command(
-        name="help",
-        description="View the Find a Curie command guide"
+def _build_embed(lang: str) -> discord.Embed:
+
+    is_nl = lang == "nl"
+
+    embed = discord.Embed(
+        title="📚 Find a Curie — Command Guide",
+        color=0x9146FF,
     )
-    async def help_command(interaction: discord.Interaction):
 
-        embed = discord.Embed(
-            title="📚 Find a Curie — Command Guide",
-            color=0x9146FF
-        )
-
-        # -------------------------------------------------
-        # LIVE TRACKING
-        # -------------------------------------------------
+    if is_nl:
         embed.add_field(
-            name="🟣 Live Tracking",
+            name="🟣 Live tracking",
             value=(
-                "**English**\n"
-                "Follow Twitch creators and receive real-time live notifications.\n\n"
-                "**Nederlands**\n"
-                "Volg Twitch-creators en ontvang realtime live meldingen.\n\n"
-                "**Commands**\n"
-                "`/live add` • `/live remove` • `/live list`"
+                "Volg Twitch-creators en ontvang realtime live meldingen.\n"
+                "`/live add` • `/live remove` • `/live list` • `/live set-channel`"
             ),
-            inline=False
+            inline=False,
         )
-
-        # -------------------------------------------------
-        # FREE GAMES
-        # -------------------------------------------------
         embed.add_field(
-            name="🎮 Free Games",
+            name="🎮 Gratis games",
             value=(
-                "**English**\n"
-                "View current free games and limited-time offers from Epic Games, Steam, GOG and Humble Bundle.\n\n"
-                "**Nederlands**\n"
-                "Bekijk actuele gratis games en tijdelijke aanbiedingen van Epic Games, Steam, GOG en Humble Bundle.\n\n"
-                "**Commands**\n"
+                "Bekijk actuele gratis games van Epic Games, Steam, GOG en Humble Bundle.\n"
                 "`/freegames` • `/game_discounts`"
             ),
-            inline=False
+            inline=False,
         )
-
-        # -------------------------------------------------
-        # AMAZON LUNA
-        # -------------------------------------------------
         embed.add_field(
-            name="🌙 Amazon Luna Membership",
+            name="🌙 Amazon Luna membership",
             value=(
-                "**English**\n"
-                "Receive updates on games offered through Amazon Luna's Prime membership program.\n\n"
-                "**Nederlands**\n"
-                "Ontvang updates over games die worden aangeboden via het Prime-lidmaatschapsprogramma van Amazon Luna.\n\n"
-                "**Command**\n"
+                "Updates over gratis games via Amazon Prime Gaming / Luna+.\n"
                 "`/membership_exclusives`"
             ),
-            inline=False
+            inline=False,
         )
-
-        # -------------------------------------------------
-        # TWITCH BADGES
-        # -------------------------------------------------
         embed.add_field(
-            name="🏅 Twitch Badges",
-            value=(
-                "**English**\n"
-                "Explore global Twitch badges.\n\n"
-                "**Nederlands**\n"
-                "Bekijk wereldwijde Twitch-badges.\n\n"
-                "**Command**\n"
-                "`/twitch_badges`"
-            ),
-            inline=False
+            name="🏅 Twitch badges",
+            value="Bekijk wereldwijde Twitch-badges.\n`/twitch_badges`",
+            inline=False,
         )
-
-        # -------------------------------------------------
-        # UTILITIES
-        # -------------------------------------------------
+        embed.add_field(
+            name="🔔 Persoonlijke meldingen",
+            value=(
+                "Ontvang een DM wanneer een streamer live gaat — zonder de hele server te pingen.\n"
+                "`/notify add` • `/notify remove` • `/notify list`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="📊 Statistieken",
+            value="Bekijk hoe actief gevolgde streamers zijn.\n`/live stats`",
+            inline=False,
+        )
+        embed.add_field(
+            name="🛠 Hulpmiddelen",
+            value=(
+                "Handige tools voor dagelijks Discord-gebruik.\n"
+                "`/convert` • `/poll` • `/reminder` • `/timestamp` • `/register`"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Hulp nodig? Vraag het aan Sim. • 🇳🇱 Nederlands")
+    else:
+        embed.add_field(
+            name="🟣 Live tracking",
+            value=(
+                "Follow Twitch creators and get real-time live notifications.\n"
+                "`/live add` • `/live remove` • `/live list` • `/live set-channel`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🎮 Free games",
+            value=(
+                "View free games and limited-time offers from Epic Games, Steam, GOG and Humble Bundle.\n"
+                "`/freegames` • `/game_discounts`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🌙 Amazon Luna membership",
+            value=(
+                "Get updates on free games via Amazon Prime Gaming / Luna+.\n"
+                "`/membership_exclusives`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🏅 Twitch badges",
+            value="Explore global Twitch badges.\n`/twitch_badges`",
+            inline=False,
+        )
+        embed.add_field(
+            name="🔔 Personal notifications",
+            value=(
+                "Receive a DM when a streamer goes live — without pinging the whole server.\n"
+                "`/notify add` • `/notify remove` • `/notify list`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="📊 Stats",
+            value="See how active tracked streamers are.\n`/live stats`",
+            inline=False,
+        )
         embed.add_field(
             name="🛠 Utilities",
             value=(
-                "**English**\n"
-                "Helpful tools for everyday Discord use in the community.\n\n"
-                "**Nederlands**\n"
-                "Handige tools voor dagelijks Discord-gebruik binnen de community.\n\n"
-                "**Commands**\n"
+                "Helpful tools for everyday Discord use.\n"
                 "`/convert` • `/poll` • `/reminder` • `/timestamp` • `/register`"
             ),
-            inline=False
+            inline=False,
         )
+        embed.set_footer(text="Need help? Ask Sim. • 🇬🇧 English")
 
-        embed.set_footer(text="Need help? Ask Sim for guidance.")
+    return embed
 
-        await interaction.response.send_message(embed=embed)
+
+# ==================================================
+# LANGUAGE TOGGLE VIEW
+# ==================================================
+
+class LanguageToggle(discord.ui.View):
+    """Button that swaps the embed between English and Dutch."""
+
+    def __init__(self, lang: str = "en"):
+        super().__init__(timeout=300)
+        self.lang = lang
+        self._refresh()
+
+    def _refresh(self):
+        self.clear_items()
+        label = "🇳🇱 Bekijk in het Nederlands" if self.lang == "en" else "🇬🇧 View in English"
+        btn = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary)
+        btn.callback = self._toggle
+        self.add_item(btn)
+
+    async def _toggle(self, interaction: discord.Interaction):
+        self.lang = "nl" if self.lang == "en" else "en"
+        self._refresh()
+        await interaction.response.edit_message(embed=_build_embed(self.lang), view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ==================================================
+# REGISTER
+# ==================================================
+
+async def register(bot, app_state, session):
+
+    @bot.tree.command(name="help", description="View the Find a Curie command guide")
+    async def help_command(interaction: discord.Interaction):
+        await interaction.response.send_message(
+            embed=_build_embed("en"),
+            view=LanguageToggle("en"),
+        )
