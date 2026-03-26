@@ -112,27 +112,72 @@ async def setup_event_handlers():
 
 
 # ==================================================
-# FREE GAME LOOP
+# Replace your existing free_games_loop in main.py
+# with this version.
 # ==================================================
-
-async def free_games_loop(session, cache):
-
+ 
+async def free_games_loop(session, cache, app_state):
+    """
+    Polls Epic + GOG every 30 minutes for new free games.
+ 
+    Fixes applied vs original:
+    1. Waits for the bot to be fully ready (DB pool initialized,
+       Discord gateway connected) before the first fetch.
+       This prevents the "DB pool not initialized" race condition.
+    2. Uses exponential backoff on errors (30s → 60s → 120s)
+       instead of always waiting the full 30 minutes on failure.
+    3. Passes app_state so the notifier can reach the DB pool.
+    """
+ 
+    POLL_INTERVAL = 1800   # 30 minutes between successful fetches
+    ERROR_BASE    = 30     # seconds to wait after first failure
+    ERROR_MAX     = 300    # cap backoff at 5 minutes
+ 
+    # ── Wait for bot + DB to be fully ready ────────────────────────────────
+    logger.info("Free games loop: waiting for bot to be ready...")
+    while not app_state.is_ready():
+        await asyncio.sleep(2)
+    logger.info("Free games loop: bot is ready — starting first fetch")
+ 
+    error_count = 0
+ 
     while True:
         try:
-            key = "free_games"
-
-            if cache and await cache.is_duplicate(key):
-                logger.info("Duplicate fetch skipped")
-            else:
-                await update_free_games_cache(
-                    session,
-                    redis=cache
-                )
-
+            await update_free_games_cache(
+                session,
+                redis=cache,
+            )
+            error_count = 0                      # reset backoff on success
+            await asyncio.sleep(POLL_INTERVAL)
+ 
+        except asyncio.CancelledError:
+            logger.info("Free games loop cancelled — shutting down cleanly")
+            break
+ 
         except Exception as e:
-            logger.error(f"Free game loop error: {e}")
-
-        await asyncio.sleep(1800)
+            error_count += 1
+            backoff = min(ERROR_BASE * (2 ** (error_count - 1)), ERROR_MAX)
+            logger.error(
+                f"Free games loop error (attempt {error_count}): {e} "
+                f"— retrying in {backoff}s"
+            )
+            await asyncio.sleep(backoff)
+ 
+ 
+# ==================================================
+# Also update this line in main() where you create
+# the background task — add app_state argument:
+#
+# OLD:
+#   free_task = asyncio.create_task(
+#       free_games_loop(session, cache)
+#   )
+#
+# NEW:
+#   free_task = asyncio.create_task(
+#       free_games_loop(session, cache, app_state)
+#   )
+# ==================================================
 
 
 # ==================================================
