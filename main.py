@@ -284,8 +284,9 @@ async def main():
         # -------------------------
         # BACKGROUND TASKS
         # -------------------------
+        # ✅ FIXED — add app_state as third argument
         free_task = asyncio.create_task(
-            free_games_loop(session, cache)
+        free_games_loop(session, cache, app_state)
         )
 
         # -------------------------
