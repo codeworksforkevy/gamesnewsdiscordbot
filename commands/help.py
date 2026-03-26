@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 
 
-async def register(bot: discord.Client):
+async def register(bot, app_state, session):
 
     @bot.tree.command(
         name="help",
@@ -18,7 +18,6 @@ async def register(bot: discord.Client):
         # -------------------------------------------------
         # LIVE TRACKING
         # -------------------------------------------------
-
         embed.add_field(
             name="🟣 Live Tracking",
             value=(
@@ -35,7 +34,6 @@ async def register(bot: discord.Client):
         # -------------------------------------------------
         # FREE GAMES
         # -------------------------------------------------
-
         embed.add_field(
             name="🎮 Free Games",
             value=(
@@ -44,7 +42,7 @@ async def register(bot: discord.Client):
                 "**Nederlands**\n"
                 "Bekijk actuele gratis games en tijdelijke aanbiedingen van Epic Games, Steam, GOG en Humble Bundle.\n\n"
                 "**Commands**\n"
-                "`/freegames` • `/discounts`"
+                "`/freegames` • `/game_discounts`"
             ),
             inline=False
         )
@@ -52,16 +50,15 @@ async def register(bot: discord.Client):
         # -------------------------------------------------
         # AMAZON LUNA
         # -------------------------------------------------
-
         embed.add_field(
             name="🌙 Amazon Luna Membership",
             value=(
                 "**English**\n"
-                "Receive updates on games offered through Amazon Luna’s Prime membership program.\n\n"
+                "Receive updates on games offered through Amazon Luna's Prime membership program.\n\n"
                 "**Nederlands**\n"
                 "Ontvang updates over games die worden aangeboden via het Prime-lidmaatschapsprogramma van Amazon Luna.\n\n"
                 "**Command**\n"
-                "`/membership`"
+                "`/membership_exclusives`"
             ),
             inline=False
         )
@@ -69,7 +66,6 @@ async def register(bot: discord.Client):
         # -------------------------------------------------
         # TWITCH BADGES
         # -------------------------------------------------
-
         embed.add_field(
             name="🏅 Twitch Badges",
             value=(
@@ -86,7 +82,6 @@ async def register(bot: discord.Client):
         # -------------------------------------------------
         # UTILITIES
         # -------------------------------------------------
-
         embed.add_field(
             name="🛠 Utilities",
             value=(
