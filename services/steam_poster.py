@@ -129,7 +129,7 @@ async def _notify_guilds(bot: discord.Client, new_games: List[Dict]) -> None:
             if not config:
                 continue
 
-            channel_id = config.get("announce_channel_id")
+            channel_id = config.get("games_channel_id") or config.get("announce_channel_id")
             if not channel_id:
                 continue
 
