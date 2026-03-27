@@ -1,16 +1,4 @@
 # commands/live_commands.py
-#
-# UX features in this file:
-#   1. /live add      — "Already live" instant alert if streamer is live right now
-#   2. /live add      — Confirmation embed with profile picture
-#   3. /live remove   — Clean removal with confirmation
-#   4. /live list     — Clickable Twitch links + streamer count
-#   5. /live set-channel — Admins set announce channel via slash command
-#   6. /live stats    — Stream activity summary per streamer
-#   7. StreamMonitor  — Rich embed: thumbnail, title, game, viewer count,
-#                       "live for X" relative timestamp (auto-updates in Discord)
-#   8. StreamMonitor  — Auto-edits embed when stream title changes
-#   9. StreamMonitor  — Live role assigned on stream start, removed on end
 
 import discord
 from discord import app_commands
@@ -28,11 +16,6 @@ logger = logging.getLogger("live-commands")
 # ==================================================
 
 def build_live_embed(stream: dict, user: dict) -> discord.Embed:
-    """
-    Rich 'now live' embed.
-    UX: started_at uses Discord's <t:X:R> format — shows "started 2 hours ago"
-        and updates live in Discord without any bot action.
-    """
     login      = stream.get("user_login") or user.get("login", "unknown")
     name       = stream.get("user_name")  or user.get("display_name", login)
     title      = stream.get("title", "Untitled stream")
@@ -41,7 +24,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
-    # Build "live for X" timestamp
     started_str = ""
     if started_at:
         try:
@@ -51,7 +33,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         except Exception:
             pass
 
-    # Substitute Twitch thumbnail dimensions
     raw_thumb = stream.get("thumbnail_url", "")
     thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
 
@@ -89,26 +70,6 @@ def build_offline_embed(login: str, display_name: str) -> discord.Embed:
     )
     embed.set_footer(text="⚫ Stream ended")
     return embed
-
-
-# ==================================================
-# FREE GAMES CLAIM BUTTON VIEW
-# UX: attached to free game embeds so users can click
-#     directly to the store page
-# ==================================================
-
-class ClaimButton(discord.ui.View):
-    """Single 'Claim now' button linking to a store URL."""
-
-    def __init__(self, url: str, label: str = "🎮 Claim now"):
-        super().__init__(timeout=None)   # persistent — never expires
-        self.add_item(
-            discord.ui.Button(
-                label=label,
-                url=url,
-                style=discord.ButtonStyle.link,
-            )
-        )
 
 
 # ==================================================
@@ -183,22 +144,12 @@ async def remove_live_role(guild: discord.Guild, twitch_login: str) -> None:
 # ==================================================
 
 class StreamMonitor:
-    """
-    Polls Twitch every 60 seconds for all tracked streamers.
-    One batch API call covers all streamers — no per-streamer requests.
-
-    State per (guild_id, login):
-        live       : bool
-        message_id : int   — Discord message to edit on title change / offline
-        channel_id : int
-        title      : str   — last known title, used to detect changes
-    """
 
     def __init__(self, bot, app_state):
         self.bot       = bot
         self.app_state = app_state
         self.db        = app_state.db
-        self._state: dict[tuple, dict] = {}
+        self._state: dict = {}
         self._task = None
 
     def start(self):
@@ -250,12 +201,19 @@ class StreamMonitor:
             login = row["twitch_login"].lower()
 
             try:
+                # FIX: check BOTH guild_settings and guild_configs so
+                # announce channel is found regardless of which table was used.
                 guild_rows = await self.db.fetch(
                     """
-                    SELECT s.guild_id, gs.announce_channel_id
+                    SELECT s.guild_id,
+                        COALESCE(gs.announce_channel_id, gc.announce_channel_id)
+                            AS announce_channel_id
                     FROM streamers s
-                    JOIN guild_settings gs ON gs.guild_id = s.guild_id
+                    LEFT JOIN guild_settings gs ON gs.guild_id = s.guild_id
+                    LEFT JOIN guild_configs  gc ON gc.guild_id = s.guild_id
                     WHERE s.twitch_login = $1
+                      AND COALESCE(gs.announce_channel_id, gc.announce_channel_id)
+                          IS NOT NULL
                     """,
                     login,
                 )
@@ -280,7 +238,9 @@ class StreamMonitor:
                     if not prev.get("live"):
                         await self._post_live(guild, channel_id, login, stream, state_key)
                     elif prev.get("title") != new_title:
-                        await self._update_title(guild, channel_id, stream, prev, state_key, new_title)
+                        await self._update_title(
+                            guild, channel_id, stream, prev, state_key, new_title
+                        )
                 else:
                     if prev.get("live"):
                         await self._post_offline(guild, channel_id, login, prev, state_key)
@@ -297,10 +257,10 @@ class StreamMonitor:
             if not channel:
                 return
 
-            user_info  = await self._get_user(login)
-            embed      = build_live_embed(stream, user_info)
-            live_role  = await ensure_live_role(guild)
-            content    = live_role.mention if live_role else None
+            user_info = await self._get_user(login)
+            embed     = build_live_embed(stream, user_info)
+            live_role = await ensure_live_role(guild)
+            content   = live_role.mention if live_role else None
 
             msg = await channel.send(content=content, embed=embed)
 
@@ -346,6 +306,27 @@ class StreamMonitor:
         except Exception as e:
             logger.error(f"post_offline failed for {login} in {guild.name}: {e}")
         await remove_live_role(guild, login)
+
+
+# ==================================================
+# HELPERS
+# ==================================================
+
+async def _get_announce_channel_id(db, guild_id: int) -> int | None:
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT COALESCE(gs.announce_channel_id, gc.announce_channel_id)
+                AS announce_channel_id
+            FROM (SELECT $1::bigint AS guild_id) x
+            LEFT JOIN guild_settings gs ON gs.guild_id = x.guild_id
+            LEFT JOIN guild_configs  gc ON gc.guild_id = x.guild_id
+            """,
+            guild_id,
+        )
+        return row["announce_channel_id"] if row else None
+    except Exception:
+        return None
 
 
 # ==================================================
@@ -407,9 +388,6 @@ async def register(bot, app_state, session):
                 "guild_id":       interaction.guild_id,
             })
 
-            # ── UX: "Already live" instant alert ──────────────────────────
-            # Check if the streamer is live RIGHT NOW so the mod doesn't
-            # have to wait up to 60s for the next monitor poll.
             live_streams = await app_state.twitch_api.get_streams_by_logins([twitch_login])
             is_live_now  = bool(live_streams)
 
@@ -431,17 +409,18 @@ async def register(bot, app_state, session):
 
             await interaction.followup.send(embed=embed)
 
-            # If they're live now, fire the notification immediately
             if is_live_now and monitor:
                 stream    = live_streams[0]
                 state_key = (interaction.guild_id, twitch_login)
-                await monitor._post_live(
-                    interaction.guild,
-                    await _get_announce_channel_id(db, interaction.guild_id),
-                    twitch_login,
-                    stream,
-                    state_key,
-                )
+                channel_id = await _get_announce_channel_id(db, interaction.guild_id)
+                if channel_id:
+                    await monitor._post_live(
+                        interaction.guild,
+                        channel_id,
+                        twitch_login,
+                        stream,
+                        state_key,
+                    )
 
         except Exception:
             logger.exception("add_streamer failed")
@@ -501,7 +480,6 @@ async def register(bot, app_state, session):
                     "📭 No streamers tracked yet. Use `/live add` to add one!",
                 )
 
-            # UX: clickable Twitch links
             lines = [
                 f"• [{r['twitch_login']}](https://www.twitch.tv/{r['twitch_login']})"
                 for r in rows
@@ -522,8 +500,6 @@ async def register(bot, app_state, session):
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
     # ── /live set-channel ──────────────────────────────────────────────────
-    # UX: admins set the announce channel via slash command —
-    #     no database editing needed.
     @group.command(
         name="set-channel",
         description="Set the channel where live notifications are posted (admin only)",
@@ -549,7 +525,7 @@ async def register(bot, app_state, session):
             )
 
             embed = discord.Embed(
-                title="✅ Announce channel set",
+                title="✅ Stream channel set",
                 description=(
                     f"Live stream notifications will now be posted in {channel.mention}.\n\n"
                     f"Make sure the bot has **Send Messages** and **Embed Links** "
@@ -557,7 +533,7 @@ async def register(bot, app_state, session):
                 ),
                 color=0x2ECC71,
             )
-            embed.set_footer(text="Use /live add to start tracking streamers")
+            embed.set_footer(text="Use /live set-games-channel to set the games channel")
             await interaction.followup.send(embed=embed)
 
         except Exception:
@@ -572,12 +548,7 @@ async def register(bot, app_state, session):
                 ephemeral=True,
             )
 
-    # ==================================================
-# ADD THIS BLOCK inside the register() function in
-# commands/live_commands.py, right after the
-# existing /live set-channel command block.
-# ==================================================
-
+    # ── /live set-games-channel ────────────────────────────────────────────
     @group.command(
         name="set-games-channel",
         description="Set the channel for free game and deals posts (admin only)",
@@ -622,9 +593,7 @@ async def register(bot, app_state, session):
             )
 
     @set_games_channel.error
-    async def set_games_channel_error(
-        interaction: discord.Interaction, error
-    ):
+    async def set_games_channel_error(interaction: discord.Interaction, error):
         if isinstance(error, app_commands.MissingPermissions):
             await interaction.response.send_message(
                 "❌ You need the **Manage Server** permission to use this command.",
@@ -632,24 +601,20 @@ async def register(bot, app_state, session):
             )
 
     # ── /live stats ────────────────────────────────────────────────────────
-    # UX: shows stream activity summary for all tracked streamers.
-    # Reads from a stream_history table (see note below).
     @group.command(name="stats", description="View stream activity for tracked streamers")
     async def live_stats(interaction: discord.Interaction):
 
         await interaction.response.defer(ephemeral=True)
 
         try:
-            # Try to fetch from stream_history table
-            # If the table doesn't exist yet, falls back to basic streamer list
             try:
                 rows = await db.fetch(
                     """
                     SELECT
                         s.twitch_login,
-                        COUNT(h.id)            AS stream_count,
-                        AVG(h.peak_viewers)    AS avg_viewers,
-                        MAX(h.started_at)      AS last_seen
+                        COUNT(h.id)         AS stream_count,
+                        AVG(h.peak_viewers) AS avg_viewers,
+                        MAX(h.started_at)   AS last_seen
                     FROM streamers s
                     LEFT JOIN stream_history h
                         ON h.twitch_login = s.twitch_login
@@ -662,7 +627,6 @@ async def register(bot, app_state, session):
                 )
                 has_history = True
             except Exception:
-                # stream_history table doesn't exist yet — show basic list
                 rows = await db.fetch(
                     "SELECT twitch_login FROM streamers WHERE guild_id = $1",
                     interaction.guild_id,
@@ -716,7 +680,7 @@ async def register(bot, app_state, session):
 
             if not has_history:
                 embed.set_footer(
-                    text="Full stats will appear once the stream_history table is set up."
+                    text="Full stats will appear once stream history is recorded."
                 )
 
             await interaction.followup.send(embed=embed)
@@ -728,19 +692,3 @@ async def register(bot, app_state, session):
     # ── Register group ─────────────────────────────────────────────────────
     bot.tree.add_command(group)
     logger.info("live_commands registered")
-
-
-# ==================================================
-# HELPERS
-# ==================================================
-
-async def _get_announce_channel_id(db, guild_id: int) -> int | None:
-    """Fetch the announce channel ID for a guild from the DB."""
-    try:
-        row = await db.fetchrow(
-            "SELECT announce_channel_id FROM guild_settings WHERE guild_id = $1",
-            guild_id,
-        )
-        return row["announce_channel_id"] if row else None
-    except Exception:
-        return None
