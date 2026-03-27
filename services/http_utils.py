@@ -1,9 +1,8 @@
 # services/http_utils.py
 #
-# FIX: session.get(url, timeout=10) passes a plain int to aiohttp which
-# expects aiohttp.ClientTimeout — this caused every single HTTP request
-# (Epic, GOG, Steam, Luna) to fail with a TypeError, logged as
-# "HTTP attempt failed" three times then "HTTP request failed permanently".
+# FIX: session.get(url, timeout=10) passed a plain integer to aiohttp
+# which expects aiohttp.ClientTimeout — this caused a TypeError on every
+# HTTP request, logged as "HTTP attempt failed" 3 times then permanently.
 
 import asyncio
 import logging
@@ -40,14 +39,15 @@ class CircuitBreaker:
     def can_execute(self):
         if not self.open:
             return True
-        if self.last_failure_time and (time.time() - self.last_failure_time) > self.cooldown:
+        if (self.last_failure_time and
+                (time.time() - self.last_failure_time) > self.cooldown):
             self.open     = False
             self.failures = 0
             return True
         return False
 
 
-_circuit_breakers: dict[str, CircuitBreaker] = {}
+_circuit_breakers: dict = {}
 
 
 def get_breaker(host: str) -> CircuitBreaker:
@@ -64,18 +64,18 @@ async def fetch_with_retry(
     session,
     url: str,
     *,
-    retries: int      = 3,
-    timeout: int      = 10,
+    retries: int       = 3,
+    timeout: int       = 10,
     total_timeout: int = 30,
     backoff_base: float = 1.5,
-    headers: dict     = None,
+    headers: dict      = None,
 ) -> str:
     """
     Robust HTTP GET with retry, exponential backoff, and circuit breaker.
 
-    FIX: timeout is now wrapped in aiohttp.ClientTimeout so aiohttp
-    accepts it. Previously passing a plain int caused TypeError on every
-    request, making Epic/GOG/Steam fetches permanently fail.
+    FIX: wraps timeout in aiohttp.ClientTimeout so aiohttp accepts it.
+    Previously passing timeout=10 (plain int) caused TypeError on every
+    single request, making Epic/GOG/Steam fetches permanently fail.
     """
     host    = url.split("/")[2] if "://" in url else url
     breaker = get_breaker(host)
@@ -83,7 +83,7 @@ async def fetch_with_retry(
     if not breaker.can_execute():
         raise Exception(f"Circuit breaker open for {host}")
 
-    # Build a proper aiohttp timeout object once
+    # Build proper aiohttp timeout object once
     aio_timeout = ClientTimeout(total=timeout)
     start_time  = time.time()
 
@@ -103,7 +103,9 @@ async def fetch_with_retry(
 
                 if resp.status >= 400:
                     text = await resp.text()
-                    logger.warning(f"Client error {resp.status} for {url}: {text[:200]}")
+                    logger.warning(
+                        f"Client error {resp.status} for {url}: {text[:200]}"
+                    )
                     raise Exception(f"Client error: {resp.status}")
 
                 breaker.record_success()
@@ -118,7 +120,9 @@ async def fetch_with_retry(
             )
 
             if is_last:
-                logger.error(f"HTTP request failed permanently: {url} — {e}")
+                logger.error(
+                    f"HTTP request failed permanently: {url} — {e}"
+                )
                 raise
 
             delay = (backoff_base ** attempt) + random.uniform(0, 0.5)
@@ -130,10 +134,10 @@ async def fetch_with_retry(
 # ==================================================
 
 async def fetch_json(session, url: str, **kwargs):
-    """Fetch URL and return parsed JSON, or (None, error)."""
-    import json
+    """Fetch URL and return (parsed_json, error)."""
+    import json as _json
     try:
         text = await fetch_with_retry(session, url, **kwargs)
-        return json.loads(text), None
+        return _json.loads(text), None
     except Exception as e:
         return None, e
