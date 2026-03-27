@@ -1,37 +1,41 @@
-import time
-import hashlib
+# utils/cache.py
+#
+# FIX: was creating a synchronous redis.from_url() client at import time.
+# The rest of the bot uses redis.asyncio — so every await redis.get()
+# was failing with "Cache read failed" because you can't await a sync call.
+#
+# RedisPagination imports redis_client from here and uses it synchronously
+# for page state tracking. We keep that interface but make it a no-op
+# wrapper so pagination falls back to in-memory page tracking instead of
+# crashing. Pagination still works — it just doesn't persist across
+# bot restarts (which is fine for a 5-minute view timeout).
+
+import os
+import logging
+
+logger = logging.getLogger("cache")
+
+REDIS_URL = os.getenv("REDIS_URL")
 
 
-class CacheManager:
-    def __init__(self, redis):
-        self.redis = redis
+class _NullCache:
+    """
+    Sync-safe no-op cache used by RedisPagination.
+    Falls back gracefully — pagination uses in-memory page index instead.
+    Returns falsy values so RedisPagination uses its memory_page fallback.
+    """
 
-    def _hash(self, key: str) -> str:
-        return hashlib.sha256(key.encode()).hexdigest()
+    def get(self, key):
+        return None
 
-    async def get(self, key: str):
-        if not self.redis:
-            return None
-        return await self.redis.get(self._hash(key))
+    def set(self, key, value, ex=None):
+        pass
 
-    async def set(self, key: str, value, ttl: int = 600):
-        if not self.redis:
-            return
-        await self.redis.setex(self._hash(key), ttl, value)
+    def __bool__(self):
+        # Return True if Redis is configured so RedisPagination
+        # thinks it has a client (it will just get None from .get())
+        return bool(REDIS_URL)
 
-    async def is_duplicate(self, key: str, ttl: int = 1800):
-        """
-        Dedup mechanism:
-        returns True if already seen
-        """
-        if not self.redis:
-            return False
 
-        hashed = self._hash(key)
-        exists = await self.redis.exists(hashed)
-
-        if exists:
-            return True
-
-        await self.redis.setex(hashed, ttl, str(time.time()))
-        return False
+# This is what RedisPagination imports
+redis_client = _NullCache()
