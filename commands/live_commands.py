@@ -572,6 +572,65 @@ async def register(bot, app_state, session):
                 ephemeral=True,
             )
 
+    # ==================================================
+# ADD THIS BLOCK inside the register() function in
+# commands/live_commands.py, right after the
+# existing /live set-channel command block.
+# ==================================================
+
+    @group.command(
+        name="set-games-channel",
+        description="Set the channel for free game and deals posts (admin only)",
+    )
+    @app_commands.describe(channel="Channel to post free games and deals in")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_games_channel(
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            await db.execute(
+                """
+                INSERT INTO guild_configs (guild_id, games_channel_id)
+                VALUES ($1, $2)
+                ON CONFLICT (guild_id) DO UPDATE
+                SET games_channel_id = EXCLUDED.games_channel_id,
+                    updated_at       = CURRENT_TIMESTAMP
+                """,
+                interaction.guild_id,
+                channel.id,
+            )
+
+            embed = discord.Embed(
+                title="✅ Games channel set",
+                description=(
+                    f"Free games, Steam deals and Prime Gaming posts will now "
+                    f"appear in {channel.mention}.\n\n"
+                    f"Stream live notifications will still go to your stream channel."
+                ),
+                color=0x2ECC71,
+            )
+            embed.set_footer(text="Use /live set-channel to change the stream channel")
+            await interaction.followup.send(embed=embed)
+
+        except Exception:
+            logger.exception("set_games_channel failed")
+            await interaction.followup.send(
+                "❌ Something went wrong. Please try again.", ephemeral=True
+            )
+
+    @set_games_channel.error
+    async def set_games_channel_error(
+        interaction: discord.Interaction, error
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "❌ You need the **Manage Server** permission to use this command.",
+                ephemeral=True,
+            )
+
     # ── /live stats ────────────────────────────────────────────────────────
     # UX: shows stream activity summary for all tracked streamers.
     # Reads from a stream_history table (see note below).
