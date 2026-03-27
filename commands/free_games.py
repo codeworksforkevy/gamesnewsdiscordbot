@@ -1,114 +1,124 @@
+# commands/free_games.py
+#
+# FIX: register(bot, session, redis=None) was wrong — command_loader
+# calls register(bot, app_state, session), so app_state was being passed
+# as session, causing 'AppState' object has no attribute 'get' on every
+# HTTP request to Epic and GOG.
+#
+# Also added: Claim now link buttons on each game embed.
+
 import logging
 import discord
 from discord import app_commands
 
 from services.free_games_service import (
     update_free_games_cache,
-    get_cached_free_games
+    get_cached_free_games,
 )
-
 from config import PLATFORM_COLORS
 
 logger = logging.getLogger("free-games-command")
 
 
 # ==================================================
-# REGISTER COMMAND
+# CLAIM BUTTON VIEW
 # ==================================================
 
-async def register(bot, session, redis=None):
+class ClaimView(discord.ui.View):
+    """Link button that takes users straight to the store page."""
+    def __init__(self, url: str, platform: str = ""):
+        super().__init__(timeout=None)
+        label = f"🎮 Claim on {platform}" if platform else "🎮 Claim now"
+        self.add_item(
+            discord.ui.Button(
+                label=label,
+                url=url,
+                style=discord.ButtonStyle.link,
+            )
+        )
+
+
+# ==================================================
+# REGISTER
+# ==================================================
+
+async def register(bot, app_state, session):
+    """
+    FIX: signature is now (bot, app_state, session) to match
+    command_loader.py which calls register(bot, app_state, session).
+    Previously was (bot, session, redis=None) which caused app_state
+    to be passed as session — breaking all HTTP requests.
+    """
 
     @bot.tree.command(
         name="freegames",
-        description="Show current free games"
+        description="Show current free games from Epic, GOG and more",
     )
     async def freegames(interaction: discord.Interaction):
 
         await interaction.response.defer(thinking=True)
 
-        games = []
+        redis = app_state.cache
 
         try:
-            # -------------------------
-            # 1. TRY CACHE FIRST
-            # -------------------------
+            # Try cache first — only fetch live if cache is empty
             games = await get_cached_free_games(redis)
 
-            # -------------------------
-            # 2. IF CACHE EMPTY → LIVE FETCH
-            # -------------------------
             if not games:
-                await update_free_games_cache(
-                    session,
-                    bot=bot,
-                    redis=redis
-                )
-
+                await update_free_games_cache(session, redis=redis)
                 games = await get_cached_free_games(redis)
 
         except Exception as e:
-            logger.exception(
-                "Freegames command failed",
-                extra={"extra_data": {"error": str(e)}}
-            )
-
+            logger.exception(f"Freegames command failed: {e}")
             await interaction.followup.send(
-                "⚠️ Failed to fetch free games.",
-                ephemeral=True
+                "⚠️ Failed to fetch free games. Please try again in a moment.",
+                ephemeral=True,
             )
             return
 
-        # -------------------------
-        # NO DATA
-        # -------------------------
         if not games:
             await interaction.followup.send(
-                "No free games found right now.",
-                ephemeral=True
+                "No free games found right now. Check back soon!",
+                ephemeral=True,
             )
             return
 
-        # -------------------------
-        # LIMIT (Discord safe)
-        # -------------------------
-        MAX_GAMES = 10
-        games = games[:MAX_GAMES]
+        # Limit to 10 to avoid Discord rate limits on followup.send
+        games = games[:10]
 
-        # -------------------------
-        # SEND EMBEDS
-        # -------------------------
         for game in games:
+            title    = game.get("title", "Unknown Title")
+            url      = game.get("url", "")
+            platform = game.get("platform", "Unknown")
+            thumb    = game.get("thumbnail")
+            end_date = game.get("end_date") or game.get("end_time", "")
 
             embed = discord.Embed(
-                title=game.get("title", "Unknown Title"),
-                url=game.get("url"),
-                color=PLATFORM_COLORS.get(
-                    game.get("platform"),
-                    0x2F3136  # default dark
-                ),
-                description=f"🎮 Free on **{game.get('platform', 'Unknown')}**"
+                title=title,
+                url=url or None,
+                color=PLATFORM_COLORS.get(platform.lower(), 0x2F3136),
+                description=f"🎮 Free on **{platform}**",
             )
 
-            if game.get("thumbnail"):
-                embed.set_thumbnail(url=game["thumbnail"])
+            if thumb:
+                embed.set_image(url=thumb)
 
-            # Footer UX
-            embed.set_footer(
-                text="Limited time offer • Grab it before it's gone!"
-            )
-
-            # Timestamp (optional)
-            if game.get("end_date"):
+            # Discord relative timestamp for expiry
+            if end_date:
                 try:
-                    embed.timestamp = discord.utils.parse_time(
-                        game["end_date"]
-                    )
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    ts = int(dt.timestamp())
+                    embed.set_footer(text=f"Free until")
+                    embed.timestamp = dt
                 except Exception:
-                    pass
+                    embed.set_footer(text="Limited time offer — grab it before it's gone!")
+            else:
+                embed.set_footer(text="Limited time offer — grab it before it's gone!")
 
-            await interaction.followup.send(embed=embed)
+            # Claim button — only if we have a URL
+            view = ClaimView(url, platform) if url else None
 
-        logger.info(
-            "Freegames command executed",
-            extra={"extra_data": {"count": len(games)}}
-        )
+            await interaction.followup.send(embed=embed, view=view)
+
+        logger.info(f"Freegames command: sent {len(games)} game(s)")
