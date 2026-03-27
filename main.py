@@ -18,6 +18,11 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_URL  = os.getenv("DATABASE_URL")
 REDIS_URL     = os.getenv("REDIS_URL")
 
+# Set SYNC_COMMANDS=true in Railway env vars ONLY when you add/rename
+# a command. Leave it unset (or false) for normal restarts to avoid
+# the 429 rate limit on every deploy.
+SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "false").lower() == "true"
+
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is not set in environment variables")
 if not DATABASE_URL:
@@ -136,7 +141,10 @@ async def free_games_loop(session, cache) -> None:
 
 # ==================================================
 # ON READY
-# FIX: startup_sync moved here so bot.guilds is populated.
+# FIX: slash command sync only runs when SYNC_COMMANDS=true
+# to avoid hitting Discord's 429 rate limit on every deploy.
+# Set SYNC_COMMANDS=true in Railway env vars when you add new commands,
+# then remove it (or set to false) for normal restarts.
 # ==================================================
 
 @bot.event
@@ -144,11 +152,14 @@ async def on_ready():
     logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     logger.info(f"Connected to {len(bot.guilds)} guild(s)")
 
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Slash commands synced: {len(synced)} command(s)")
-    except Exception as e:
-        logger.error(f"Slash command sync failed: {e}")
+    if SYNC_COMMANDS:
+        try:
+            synced = await bot.tree.sync()
+            logger.info(f"Slash commands synced: {len(synced)} command(s)")
+        except Exception as e:
+            logger.error(f"Slash command sync failed: {e}")
+    else:
+        logger.info("Slash command sync skipped (set SYNC_COMMANDS=true to sync)")
 
     try:
         await startup_sync(bot)
@@ -161,7 +172,6 @@ async def on_ready():
 
 # ==================================================
 # WEB SERVER
-# FIX: app_state.is_ready is a bool not a callable
 # ==================================================
 
 async def start_web_server(bot, app_state):
@@ -203,10 +213,6 @@ async def main():
     await app_state.db.connect()
     logger.info("Database connected")
 
-    # FIX: wire guild_settings to the same DB instance.
-    # Previously it used a separate singleton (core/state_manager.py)
-    # that was never populated — causing "DB pool not initialized" on
-    # every guild during startup_sync and in the notifier.
     guild_settings_module.set_db(app_state.db)
 
     # ── Redis ──────────────────────────────────────────────────────────────
