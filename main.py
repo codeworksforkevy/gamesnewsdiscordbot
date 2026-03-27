@@ -72,10 +72,11 @@ from services.state import AppState
 from services.cache import CacheManager
 from services.redis_client import RedisClient
 
-from services.free_games_service import update_free_games_cache, init_cache
-from services.luna_poster        import luna_poster_loop
-from services.steam_poster       import steam_poster_loop
-from services.notifier           import register_notifier
+from services.free_games_service     import update_free_games_cache, init_cache
+from services.luna_poster            import luna_poster_loop
+from services.steam_poster           import steam_poster_loop
+from services.notifier               import register_notifier
+from services.twitch_badges_fetcher  import badge_fetcher_loop
 
 from startup import startup_sync
 
@@ -255,6 +256,9 @@ async def main():
         steam_task = asyncio.create_task(
             steam_poster_loop(bot, session, cache), name="steam-poster-loop"
         )
+        badge_task = asyncio.create_task(
+            badge_fetcher_loop(app_state), name="badge-fetcher"
+        )
 
         runner = await start_web_server(bot, app_state)
 
@@ -280,10 +284,11 @@ async def main():
         free_task.cancel()
         luna_task.cancel()
         steam_task.cancel()
+        badge_task.cancel()
         bot_task.cancel()
 
         await asyncio.gather(
-            free_task, luna_task, steam_task, bot_task,
+            free_task, luna_task, steam_task, badge_task, bot_task,
             return_exceptions=True,
         )
 
