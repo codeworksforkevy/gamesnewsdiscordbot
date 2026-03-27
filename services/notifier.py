@@ -136,7 +136,7 @@ async def handle_free_games(
                 logger.debug(f"No config for guild {guild.id} — skipping")
                 continue
 
-            channel_id = config.get("announce_channel_id")
+           channel_id = config.get("games_channel_id") or config.get("announce_channel_id")
             if not channel_id:
                 logger.debug(f"No announce channel for guild {guild.id} — skipping")
                 continue
