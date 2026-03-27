@@ -1,105 +1,109 @@
+# services/http_utils.py
+#
+# FIX: session.get(url, timeout=10) passes a plain int to aiohttp which
+# expects aiohttp.ClientTimeout — this caused every single HTTP request
+# (Epic, GOG, Steam, Luna) to fail with a TypeError, logged as
+# "HTTP attempt failed" three times then "HTTP request failed permanently".
+
 import asyncio
 import logging
 import random
 import time
 
+from aiohttp import ClientTimeout
+
 logger = logging.getLogger("http-utils")
 
 
 # ==================================================
-# CIRCUIT BREAKER STATE
+# CIRCUIT BREAKER
 # ==================================================
+
 class CircuitBreaker:
     def __init__(self, failure_threshold=5, cooldown=30):
         self.failure_threshold = failure_threshold
-        self.cooldown = cooldown
-
-        self.failures = 0
+        self.cooldown          = cooldown
+        self.failures          = 0
         self.last_failure_time = None
-        self.open = False
+        self.open              = False
 
     def record_failure(self):
         self.failures += 1
         self.last_failure_time = time.time()
-
         if self.failures >= self.failure_threshold:
             self.open = True
 
     def record_success(self):
         self.failures = 0
-        self.open = False
+        self.open     = False
 
     def can_execute(self):
         if not self.open:
             return True
-
-        # cooldown check
         if self.last_failure_time and (time.time() - self.last_failure_time) > self.cooldown:
-            self.open = False
+            self.open     = False
             self.failures = 0
             return True
-
         return False
 
 
-# global breakers per host
-_circuit_breakers = {}
+_circuit_breakers: dict[str, CircuitBreaker] = {}
 
 
-def get_breaker(host):
+def get_breaker(host: str) -> CircuitBreaker:
     if host not in _circuit_breakers:
         _circuit_breakers[host] = CircuitBreaker()
     return _circuit_breakers[host]
 
 
 # ==================================================
-# FETCH WITH RETRY (PRODUCTION GRADE)
+# FETCH WITH RETRY
 # ==================================================
+
 async def fetch_with_retry(
     session,
-    url,
+    url: str,
     *,
-    retries=3,
-    timeout=10,
-    total_timeout=30,
-    backoff_base=1.5
-):
+    retries: int      = 3,
+    timeout: int      = 10,
+    total_timeout: int = 30,
+    backoff_base: float = 1.5,
+    headers: dict     = None,
+) -> str:
     """
-    Robust HTTP fetch with:
-    - retry
-    - exponential backoff + jitter
-    - circuit breaker
-    - total timeout protection
-    """
+    Robust HTTP GET with retry, exponential backoff, and circuit breaker.
 
-    host = url.split("/")[2] if "://" in url else url
+    FIX: timeout is now wrapped in aiohttp.ClientTimeout so aiohttp
+    accepts it. Previously passing a plain int caused TypeError on every
+    request, making Epic/GOG/Steam fetches permanently fail.
+    """
+    host    = url.split("/")[2] if "://" in url else url
     breaker = get_breaker(host)
 
     if not breaker.can_execute():
         raise Exception(f"Circuit breaker open for {host}")
 
-    start_time = time.time()
+    # Build a proper aiohttp timeout object once
+    aio_timeout = ClientTimeout(total=timeout)
+    start_time  = time.time()
 
     for attempt in range(retries):
         try:
-            # global timeout guard
             if (time.time() - start_time) > total_timeout:
                 raise TimeoutError("Total request timeout exceeded")
 
-            async with session.get(url, timeout=timeout) as resp:
+            kwargs = {"timeout": aio_timeout}
+            if headers:
+                kwargs["headers"] = headers
 
-                # handle HTTP status codes
+            async with session.get(url, **kwargs) as resp:
+
+                if resp.status >= 500:
+                    raise Exception(f"Server error: {resp.status}")
+
                 if resp.status >= 400:
-                    # retry only on server errors
-                    if resp.status >= 500:
-                        raise Exception(f"Server error: {resp.status}")
-
-                    # client error → no retry
                     text = await resp.text()
-                    logger.warning(
-                        "Client error",
-                        extra={"url": url, "status": resp.status, "body": text[:200]}
-                    )
+                    logger.warning(f"Client error {resp.status} for {url}: {text[:200]}")
                     raise Exception(f"Client error: {resp.status}")
 
                 breaker.record_success()
@@ -107,42 +111,29 @@ async def fetch_with_retry(
 
         except Exception as e:
             breaker.record_failure()
-
             is_last = attempt == retries - 1
 
             logger.warning(
-                "HTTP attempt failed",
-                extra={
-                    "url": url,
-                    "attempt": attempt + 1,
-                    "error": str(e)
-                }
+                f"HTTP attempt {attempt + 1}/{retries} failed for {url}: {e}"
             )
 
             if is_last:
-                logger.error(
-                    "HTTP request failed permanently",
-                    extra={"url": url, "error": str(e)}
-                )
+                logger.error(f"HTTP request failed permanently: {url} — {e}")
                 raise
 
-            # exponential backoff + jitter
             delay = (backoff_base ** attempt) + random.uniform(0, 0.5)
-
             await asyncio.sleep(delay)
 
 
 # ==================================================
-# OPTIONAL: JSON FETCH HELPER
+# JSON CONVENIENCE WRAPPER
 # ==================================================
-async def fetch_json(session, url, **kwargs):
-    """
-    Convenience wrapper for JSON APIs
-    """
 
-    text = await fetch_with_retry(session, url, **kwargs)
-
+async def fetch_json(session, url: str, **kwargs):
+    """Fetch URL and return parsed JSON, or (None, error)."""
+    import json
     try:
-        return text, None
+        text = await fetch_with_retry(session, url, **kwargs)
+        return json.loads(text), None
     except Exception as e:
         return None, e
