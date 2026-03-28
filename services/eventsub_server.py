@@ -6,7 +6,7 @@ import os
 
 from aiohttp import web
 
-from event_router import handle_stream_online, handle_stream_offline
+from services.event_router import handle_stream_online, handle_stream_offline
 
 logger = logging.getLogger("eventsub_server")
 
