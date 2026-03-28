@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from utils.pagination import RedisPagination
-from config import PLATFORM_COLORS
+from constants import PLATFORM_COLORS
 
 CACHE_FILE = Path("data/twitch_badges_cache.json")
 
