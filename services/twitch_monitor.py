@@ -49,7 +49,7 @@ class TwitchMonitor:
         rows = await db.fetch("SELECT broadcaster_id, twitch_login FROM streamers")
 
         for row in rows:
-            user_id = row["broadcaster_id"]
+            user_id = row["twitch_user_id"]
             login   = row["twitch_login"]
 
             try:
