@@ -46,10 +46,10 @@ class TwitchMonitor:
         db         = self.app_state.db
         twitch_api = self.app_state.twitch_api
 
-        rows = await db.fetch("SELECT twitch_user_id, twitch_login FROM streamers")
+        rows = await db.fetch("SELECT broadcaster_id, twitch_login FROM streamers")
 
         for row in rows:
-            user_id = row["twitch_user_id"]
+            user_id = row["broadcaster_id"]
             login   = row["twitch_login"]
 
             try:
