@@ -236,7 +236,10 @@ async def on_ready() -> None:
     )
 
     # ── Slash command sync ──────────────────────────────────────
-    if SYNC_COMMANDS:
+    # Always sync on startup — safe to do once per deploy.
+    # Only hits Discord's 429 rate limit if restarted >200 times/day.
+    # Set SYNC_COMMANDS=false to skip (e.g. during rapid crash-loop restarts).
+    if os.getenv("SYNC_COMMANDS", "true").lower() != "false":
         try:
             synced = await bot.tree.sync()
             logger.info(
@@ -246,7 +249,7 @@ async def on_ready() -> None:
         except Exception as e:
             logger.error(f"Slash command sync failed: {e}", exc_info=True)
     else:
-        logger.info("Slash command sync skipped (SYNC_COMMANDS not set)")
+        logger.info("Slash command sync skipped (SYNC_COMMANDS=false)")
 
     # ── Load channel registry ───────────────────────────────────
     try:
