@@ -107,7 +107,7 @@ async def startup_sync(bot) -> None:
             # Tracked streamers
             try:
                 streamers = await db.fetch(
-                    "SELECT twitch_user_id, twitch_login FROM streamers WHERE guild_id = $1",
+                    "SELECT broadcaster_id, twitch_login FROM streamers WHERE guild_id = $1",
                     guild.id,
                 )
                 logger.info(f"{guild.name} → {len(streamers)} streamer(s) tracked")
@@ -133,7 +133,7 @@ async def startup_sync(bot) -> None:
                     for s in streamers:
                         try:
                             await eventsub.ensure_subscriptions(
-                                s["twitch_user_id"], callback_url
+                                s["broadcaster_id"], callback_url
                             )
                             logger.info(f"EventSub subscribed: {s['twitch_login']}")
                         except Exception as e:
