@@ -26,12 +26,12 @@ class EventSubManager:
     def __init__(self, session: aiohttp.ClientSession):
         self.session   = session
         self.client_id = os.getenv("TWITCH_CLIENT_ID")
-        self.token     = os.getenv("TWITCH_APP_TOKEN")
+        self.token     = os.getenv("TWITCH_ACCESS_TOKEN")
         self.secret    = os.getenv("TWITCH_EVENTSUB_SECRET", "supersecret")
 
         if not self.client_id or not self.token:
             raise RuntimeError(
-                "TWITCH_CLIENT_ID and TWITCH_APP_TOKEN must be set "
+                "TWITCH_CLIENT_ID and TWITCH_ACCESS_TOKEN must be set "
                 "before creating EventSubManager"
             )
 
