@@ -29,6 +29,15 @@ class EventSubManager:
         self.token     = os.getenv("TWITCH_ACCESS_TOKEN")
         self.secret    = os.getenv("TWITCH_EVENTSUB_SECRET", "supersecret")
 
+        # Derive callback URL — used by monitor.py
+        self.callback_url = (
+            os.getenv("TWITCH_EVENTSUB_CALLBACK_URL")
+            or (
+                f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}/eventsub"
+                if os.getenv("RAILWAY_PUBLIC_DOMAIN") else None
+            )
+        )
+
         if not self.client_id or not self.token:
             raise RuntimeError(
                 "TWITCH_CLIENT_ID and TWITCH_ACCESS_TOKEN must be set "
@@ -133,6 +142,27 @@ class EventSubManager:
     # ──────────────────────────────────────────────────────────
     # PUBLIC API
     # ──────────────────────────────────────────────────────────
+
+    async def list_subscriptions(self) -> list:
+        """
+        Returns all active EventSub subscriptions from Twitch.
+        Used by monitor.py to audit which broadcasters are subscribed.
+        """
+        try:
+            async with self.session.get(
+                TWITCH_EVENTSUB_URL,
+                headers=self._headers,
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        f"list_subscriptions failed: HTTP {resp.status}"
+                    )
+                    return []
+                data = await resp.json()
+                return data.get("data", [])
+        except Exception as e:
+            logger.exception(f"list_subscriptions error: {e}")
+            return []
 
     async def ensure_subscriptions(
         self,
