@@ -15,7 +15,7 @@ from services.free_games_service import (
     update_free_games_cache,
     get_cached_free_games,
 )
-from config import PLATFORM_COLORS
+from constants import PLATFORM_COLORS
 
 logger = logging.getLogger("free-games-command")
 
