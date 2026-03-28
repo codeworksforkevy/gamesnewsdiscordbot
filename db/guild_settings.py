@@ -50,54 +50,62 @@ async def get_guild_config(guild_id: int) -> Optional[Dict]:
     """
     db = _get_db()
 
-    # ── Primary table ───────────────────────────────────────────
-    row = await db.fetchrow(
-        """
-        SELECT guild_id,
-               announce_channel_id,
-               games_channel_id,
-               ping_role_id,
-               live_role_id,
-               notify_enabled,
-               enable_ping,
-               enable_epic,
-               enable_gog,
-               enable_steam
-        FROM guild_configs
-        WHERE guild_id = $1
-        """,
-        guild_id,
-    )
-
-    if row:
-        d = dict(row)
-        if not d.get("games_channel_id"):
-            d["games_channel_id"] = d.get("announce_channel_id")
-        return d
-
-    # ── Legacy table fallback ───────────────────────────────────
-    row = await db.fetchrow(
-        """
-        SELECT guild_id,
-               announce_channel_id,
-               games_channel_id
-        FROM guild_settings
-        WHERE guild_id = $1
-        """,
-        guild_id,
-    )
-
-    if row:
-        logger.warning(
-            "Guild is using legacy guild_settings table — please migrate to guild_configs",
-            extra={"extra_data": {"guild_id": guild_id}},
+    try:
+        # ── Primary table ───────────────────────────────────────
+        row = await db.fetchrow(
+            """
+            SELECT guild_id,
+                   announce_channel_id,
+                   games_channel_id,
+                   ping_role_id,
+                   live_role_id,
+                   notify_enabled,
+                   enable_ping,
+                   enable_epic,
+                   enable_gog,
+                   enable_steam
+            FROM guild_configs
+            WHERE guild_id = $1
+            """,
+            guild_id,
         )
-        d = dict(row)
-        if not d.get("games_channel_id"):
-            d["games_channel_id"] = d.get("announce_channel_id")
-        return d
 
-    return None
+        if row:
+            d = dict(row)
+            if not d.get("games_channel_id"):
+                d["games_channel_id"] = d.get("announce_channel_id")
+            return d
+
+        # ── Legacy table fallback ───────────────────────────────
+        row = await db.fetchrow(
+            """
+            SELECT guild_id,
+                   announce_channel_id,
+                   games_channel_id
+            FROM guild_settings
+            WHERE guild_id = $1
+            """,
+            guild_id,
+        )
+
+        if row:
+            logger.warning(
+                "Guild is using legacy guild_settings table — please migrate to guild_configs",
+                extra={"extra_data": {"guild_id": guild_id}},
+            )
+            d = dict(row)
+            if not d.get("games_channel_id"):
+                d["games_channel_id"] = d.get("announce_channel_id")
+            return d
+
+        return None
+
+    except Exception as e:
+        logger.error(
+            "get_guild_config failed — table may not exist yet (run migrations)",
+            extra={"extra_data": {"guild_id": guild_id, "error": str(e)}},
+        )
+        return None
 
 
 # ──────────────────────────────────────────────────────────────
