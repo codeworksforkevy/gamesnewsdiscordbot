@@ -337,6 +337,12 @@ async def main() -> None:
     # Wire global state singleton (used by streamer_queries and others)
     global_state.set_db_pool(app_state.db.pool)
 
+    # ── Auto-migration ───────────────────────────────────────────────────────
+    # Tabloları oluşturur, eksik kolonları ekler, guild config'i yazar.
+    # Her açılışta çalışır — idempotent, güvenli.
+    from db.migrations import run_migrations
+    await run_migrations(app_state.db)
+
     # ── Redis ────────────────────────────────────────────────────
     cache: CacheManager | None = None
 
