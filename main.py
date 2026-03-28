@@ -97,7 +97,7 @@ logger = logging.getLogger("bot")
 # CONFIG  (validates ALL env vars at once before anything starts)
 # ──────────────────────────────────────────────────────────────
 
-from config.settings import get_config, ConfigError
+from settings import get_config, ConfigError
 
 try:
     config = get_config()
