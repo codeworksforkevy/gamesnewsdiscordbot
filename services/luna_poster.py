@@ -15,7 +15,7 @@ import discord
 
 from services.luna import fetch_luna_membership
 from services.diff_engine import diff_games
-from config import PLATFORM_COLORS, LUNA_UPDATE_INTERVAL
+from constants import PLATFORM_COLORS, LUNA_UPDATE_INTERVAL
 from db.guild_settings import get_guild_config
 
 logger = logging.getLogger("luna-poster")
