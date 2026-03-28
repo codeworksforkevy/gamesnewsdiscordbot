@@ -68,9 +68,10 @@ class EventSubManager:
                 params={"broadcaster_user_id": broadcaster_id},
             ) as resp:
                 if resp.status != 200:
+                    body = await resp.text()
                     logger.warning(
-                        "Could not fetch existing subscriptions",
-                        extra={"extra_data": {"status": resp.status}},
+                        f"Could not fetch existing subscriptions — "
+                        f"HTTP {resp.status}: {body[:200]}"
                     )
                     return []
 
@@ -116,13 +117,9 @@ class EventSubManager:
 
                 if resp.status >= 300:
                     logger.error(
-                        "EventSub subscribe failed",
-                        extra={"extra_data": {
-                            "type":       event_type,
-                            "broadcaster": broadcaster_user_id,
-                            "status":     resp.status,
-                            "response":   text,
-                        }},
+                        f"EventSub subscribe failed — "
+                        f"type={event_type} broadcaster={broadcaster_user_id} "
+                        f"HTTP {resp.status}: {text[:300]}"
                     )
                     return False
 
@@ -154,12 +151,15 @@ class EventSubManager:
                 headers=self._headers,
             ) as resp:
                 if resp.status != 200:
+                    body = await resp.text()
                     logger.warning(
-                        f"list_subscriptions failed: HTTP {resp.status}"
+                        f"list_subscriptions failed — HTTP {resp.status}: {body[:200]}"
                     )
                     return []
                 data = await resp.json()
-                return data.get("data", [])
+                subs = data.get("data", [])
+                logger.info(f"list_subscriptions: {len(subs)} active subscription(s)")
+                return subs
         except Exception as e:
             logger.exception(f"list_subscriptions error: {e}")
             return []
