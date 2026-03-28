@@ -74,11 +74,11 @@ async def handle_stream_online(bot, event: dict):
 
     # ── Deduplication: skip if already flagged "Live" in Redis ──
     existing_status = await redis_client.get(_status_key(user_login))
-    if existing_status == b"live":
+    if existing_status == "live":
         logger.info(f"Duplicate online event ignored for {user_login}")
         return
 
-    await redis_client.set(_status_key(user_login), "live", ex=LIVE_TTL)
+    await redis_client.set(_status_key(user_login), "live", ttl=LIVE_TTL)
 
     # ── Fetch Twitch stream metadata ────────────────────────────
     stream = await get_cached_stream(user_login)
@@ -117,7 +117,7 @@ async def handle_stream_online(bot, event: dict):
         if not stored_msg:
             try:
                 message = await channel.send(content=content, embed=embed)
-                await redis_client.set(msg_key, str(message.id), ex=LIVE_TTL)
+                await redis_client.set(msg_key, str(message.id), ttl=LIVE_TTL)
                 logger.info(f"Sent notification for {user_login} in guild {guild.id}")
             except Exception as e:
                 logger.error(f"Send failed for guild {guild.id}: {e}")
@@ -199,7 +199,7 @@ async def get_stream_status(user_login: str) -> dict | None:
     user_login = user_login.lower()
     status     = await redis_client.get(_status_key(user_login))
 
-    if status != b"live":
+    if status != "live":
         return None
 
     stream = await get_cached_stream(user_login)
