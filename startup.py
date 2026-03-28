@@ -128,8 +128,22 @@ async def startup_sync(bot) -> None:
                     broadcaster_id = s["twitch_user_id"]
                     twitch_login   = s["twitch_login"]
                     try:
-                        webhook_url = app_state.get_config("webhook_url")
-                        await eventsub.subscribe_stream_online(
+                        # Resolve callback URL: config → env var → Railway domain
+                        webhook_url = (
+                            app_state.get_config("webhook_url")
+                            or __import__("os").getenv("TWITCH_EVENTSUB_CALLBACK_URL")
+                        )
+                        if not webhook_url:
+                            railway = __import__("os").getenv("RAILWAY_PUBLIC_DOMAIN")
+                            if railway:
+                                webhook_url = f"https://{railway}/eventsub"
+                        if not webhook_url:
+                            logger.warning(
+                                f"No callback URL available for EventSub — "
+                                f"set TWITCH_EVENTSUB_CALLBACK_URL in Railway"
+                            )
+                            continue
+                        await eventsub.ensure_subscriptions(
                             broadcaster_id, webhook_url
                         )
                         logger.info(f"EventSub subscribed: {twitch_login}")
