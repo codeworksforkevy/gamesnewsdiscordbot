@@ -176,33 +176,47 @@ class StreamMonitor:
     async def _poll(self):
         twitch = self.app_state.twitch_api
 
+        # ── DEBUG: confirm twitch_api is available ──────────────
+        if not twitch:
+            logger.error("🔴 DEBUG StreamMonitor: twitch_api is None — cannot poll")
+            return
+
+        # ── STEP 1: Fetch streamers from DB ────────────────────
         try:
             rows = await self.db.fetch(
                 "SELECT DISTINCT twitch_login, broadcaster_id FROM streamers"
             )
         except Exception as e:
-            logger.error(f"StreamMonitor DB fetch failed: {e}")
+            logger.error(f"🔴 DEBUG StreamMonitor: DB fetch failed — {e}")
             return
 
         if not rows:
+            logger.info("🟡 DEBUG StreamMonitor: no streamers in DB — nothing to poll")
             return
 
         logins = [r["twitch_login"] for r in rows]
+        logger.info(
+            f"🟢 DEBUG StreamMonitor: polling {len(logins)} streamers — {logins}"
+        )
 
+        # ── STEP 2: Ask Twitch who is live ─────────────────────
         try:
             live_streams = await twitch.get_streams_by_logins(logins)
         except Exception as e:
-            logger.error(f"Twitch batch fetch failed: {e}")
+            logger.error(f"🔴 DEBUG StreamMonitor: Twitch API failed — {e}")
             return
 
         live_map = {s["user_login"].lower(): s for s in live_streams}
+        logger.info(
+            f"🟢 DEBUG StreamMonitor: Twitch says live → {list(live_map.keys()) or 'nobody'}"
+        )
 
+        # ── STEP 3: Per-streamer state check ───────────────────
         for row in rows:
             login = row["twitch_login"].lower()
 
+            # ── STEP 4: Find guild + channel from DB ───────────
             try:
-                # FIX: check BOTH guild_settings and guild_configs so
-                # announce channel is found regardless of which table was used.
                 guild_rows = await self.db.fetch(
                     """
                     SELECT s.guild_id,
@@ -218,10 +232,25 @@ class StreamMonitor:
                     login,
                 )
             except Exception as e:
-                logger.error(f"Guild fetch failed for {login}: {e}")
+                logger.error(f"🔴 DEBUG StreamMonitor: guild fetch failed for {login} — {e}")
                 continue
 
-            stream = live_map.get(login)
+            if not guild_rows:
+                logger.warning(
+                    f"🟡 DEBUG StreamMonitor: {login} — no guild+channel found. "
+                    f"guild_configs/guild_settings may be missing announce_channel_id"
+                )
+                continue
+
+            stream    = live_map.get(login)
+            is_live   = bool(stream)
+            prev_state = self._state.get((guild_rows[0]["guild_id"], login), {})
+
+            logger.info(
+                f"🟢 DEBUG StreamMonitor: {login} — "
+                f"twitch_live={is_live} | prev_live={prev_state.get('live', False)} | "
+                f"guilds_with_channel={len(guild_rows)}"
+            )
 
             for guild_row in guild_rows:
                 guild_id   = guild_row["guild_id"]
@@ -231,18 +260,36 @@ class StreamMonitor:
                 guild      = self.bot.get_guild(guild_id)
 
                 if not guild:
+                    logger.warning(
+                        f"🟡 DEBUG StreamMonitor: guild {guild_id} not in bot cache — "
+                        f"bot may not be in this guild"
+                    )
                     continue
 
                 if stream:
                     new_title = stream.get("title", "")
                     if not prev.get("live"):
+                        logger.info(
+                            f"🚀 DEBUG StreamMonitor: {login} went LIVE — "
+                            f"posting to channel {channel_id} in {guild.name}"
+                        )
                         await self._post_live(guild, channel_id, login, stream, state_key)
                     elif prev.get("title") != new_title:
+                        logger.info(
+                            f"📡 DEBUG StreamMonitor: {login} title changed — updating embed"
+                        )
                         await self._update_title(
                             guild, channel_id, stream, prev, state_key, new_title
                         )
+                    else:
+                        logger.info(
+                            f"⚪ DEBUG StreamMonitor: {login} still live, no change"
+                        )
                 else:
                     if prev.get("live"):
+                        logger.info(
+                            f"⚫ DEBUG StreamMonitor: {login} went offline — posting"
+                        )
                         await self._post_offline(guild, channel_id, login, prev, state_key)
 
     async def _get_user(self, login: str) -> dict:
