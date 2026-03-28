@@ -184,7 +184,7 @@ class StreamMonitor:
         # ── STEP 1: Fetch streamers from DB ────────────────────
         try:
             rows = await self.db.fetch(
-                "SELECT DISTINCT twitch_login, broadcaster_id FROM streamers"
+                "SELECT DISTINCT twitch_login, twitch_user_id FROM streamers"
             )
         except Exception as e:
             logger.error(f"🔴 DEBUG StreamMonitor: DB fetch failed — {e}")
@@ -423,7 +423,7 @@ async def register(bot, app_state, session):
 
             await db.execute(
                 """
-                INSERT INTO streamers (broadcaster_id, twitch_login, guild_id)
+                INSERT INTO streamers (twitch_user_id, twitch_login, guild_id)
                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
                 """,
                 twitch_user_id, twitch_login, interaction.guild_id,
