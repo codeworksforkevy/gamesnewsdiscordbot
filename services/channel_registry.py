@@ -47,10 +47,18 @@ async def load_channels(db, bot) -> None:
         )
 
     except Exception as e:
-        logger.error(
-            "Failed to load channels",
-            extra={"extra_data": {"error": str(e)}},
-        )
+        err = str(e)
+        # Silently skip if the table doesn't exist yet — run migrations to create it
+        if "guild_notification_channels" in err or "does not exist" in err:
+            logger.info(
+                "guild_notification_channels table not found — skipping "
+                "(run database/schema.sql to create it)"
+            )
+        else:
+            logger.error(
+                "Failed to load channels",
+                extra={"extra_data": {"error": err}},
+            )
         bot.app_state.channels = []
 
 
