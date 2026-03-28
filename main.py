@@ -88,7 +88,7 @@ from discord.ext import commands
 # file output, per-module level overrides via LOG_LEVELS env var,
 # and silences noisy third-party libs automatically.
 
-from core.logging_config import setup_logging
+from services.logging_config import setup_logging
 setup_logging()
 logger = logging.getLogger("bot")
 
