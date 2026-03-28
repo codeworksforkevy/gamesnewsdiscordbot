@@ -97,7 +97,7 @@ logger = logging.getLogger("bot")
 # CONFIG  (validates ALL env vars at once before anything starts)
 # ──────────────────────────────────────────────────────────────
 
-from settings import get_config, ConfigError
+from config.settings import get_config, ConfigError
 
 try:
     config = get_config()
@@ -134,12 +134,12 @@ bot = commands.Bot(
 # IMPORTS  (after bot is created so cogs can reference it)
 # ──────────────────────────────────────────────────────────────
 
-from core.container     import AppState
-from core.state_manager import state as global_state
-from core.event_bus     import event_bus
-from core.registry      import CommandRegistry
-from core.feature_flags import FeatureFlags
-from core.command_loader import load_all_commands
+from services.state         import AppState
+from core.state_manager     import state as global_state
+from core.event_bus         import event_bus
+from core.registry          import CommandRegistry
+from core.feature_flags     import FeatureFlags
+from core.command_loader    import load_all_commands
 
 from services.db                    import Database
 from services.cache                 import CacheManager
@@ -152,7 +152,7 @@ from services.twitch_badges_fetcher import badge_fetcher_loop
 from services                       import eventsub_server
 from services.webhook               import create_webhook_app
 
-from channel_registry import load_channels
+from services.channel_registry import load_channels
 from startup          import startup_sync
 
 import db.guild_settings as guild_settings_module
@@ -270,8 +270,7 @@ async def on_ready() -> None:
         logger.error(f"Startup sync failed: {e}", exc_info=True)
 
     # ── Mark state ready ────────────────────────────────────────
-    # container.AppState.is_ready() is a property — no mark_ready() needed.
-    # We store bot reference on the global state singleton too.
+    app_state.mark_ready()
     global_state.set_bot(bot)
 
     logger.info(
@@ -291,7 +290,7 @@ async def _start_web_server(bot, app_state) -> web.AppRunner:
     main_app.add_subapp("/webhook", webhook_app)
 
     async def health(_: web.Request) -> web.Response:
-        ready = app_state.is_ready()
+        ready = app_state.is_ready
         return web.json_response(
             {
                 "status": "ok" if ready else "starting",
