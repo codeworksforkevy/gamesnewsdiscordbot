@@ -3,7 +3,7 @@ from discord import app_commands
 
 from services.luna import fetch_luna_membership
 from utils.pagination import RedisPagination
-from config import PLATFORM_COLORS
+from constants import PLATFORM_COLORS
 
 
 async def register(bot, app_state, session):
