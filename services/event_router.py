@@ -86,8 +86,24 @@ async def handle_stream_online(bot, event: dict):
     await redis_client.set(_status_key(user_login), "live", ttl=LIVE_TTL)
     logger.info(f"🟢 DEBUG event_router: Redis live flag set for {user_login}")
 
-    # ── Fetch metadata ─────────────────────────────────────────
-    stream = await get_cached_stream(user_login)
+    # ── Fetch metadata — use reliable API method directly ─────
+    stream = None
+    try:
+        from core.state_manager import state
+        api = state.get_bot().app_state.twitch_api
+        if api:
+            results = await api.get_streams_by_logins([user_login])
+            stream  = results[0] if results else None
+    except Exception as e:
+        logger.warning(f"🟡 DEBUG event_router: metadata fetch failed ({e}) — using fallback title")
+
+    # Also try cache as secondary source
+    if not stream:
+        try:
+            stream = await get_cached_stream(user_login)
+        except Exception:
+            pass
+
     logger.info(
         f"🟢 DEBUG event_router: stream metadata = "
         f"title={stream.get('title') if stream else None} | "
@@ -226,23 +242,34 @@ async def get_stream_status(user_login: str) -> dict | None:
     or None if they are offline.
 
     Priority:
-    1. Redis live flag (set by handle_stream_online) — instant
-    2. Twitch API direct check — fallback when Redis has no flag yet
-       (e.g. bot just restarted, StreamMonitor hasn't polled yet)
+    1. Redis live flag (instant, set when stream goes live)
+    2. Twitch API direct check via get_streams_by_logins (reliable fallback)
     """
     user_login = user_login.lower()
     status     = await redis_client.get(_status_key(user_login))
 
     if status == "live":
-        stream = await get_cached_stream(user_login)
-        return stream
-
-    # Redis has no flag — ask Twitch API directly
-    try:
+        # Already flagged live — return cached metadata
         stream = await get_cached_stream(user_login)
         if stream:
             return stream
-    except Exception:
-        pass
+
+    # No Redis flag — hit Twitch API directly to get real-time status
+    try:
+        from core.state_manager import state
+        api = state.get_bot().app_state.twitch_api
+        if api:
+            live_streams = await api.get_streams_by_logins([user_login])
+            if live_streams:
+                s = live_streams[0]
+                return {
+                    "title":        s.get("title"),
+                    "game_name":    s.get("game_name"),
+                    "user_login":   s.get("user_login", user_login),
+                    "viewer_count": s.get("viewer_count"),
+                    "started_at":   s.get("started_at"),
+                }
+    except Exception as e:
+        logger.warning(f"get_stream_status API fallback failed for {user_login}: {e}")
 
     return None
