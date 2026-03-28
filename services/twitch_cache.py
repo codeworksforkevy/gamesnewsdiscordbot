@@ -44,7 +44,7 @@ async def get_cached_stream(login: str) -> dict | None:
         return None
 
     try:
-        data = await api.helix_request("streams", {"user_login": login})
+        data = await api.request("streams", params={"user_login": login})
     except Exception as e:
         logger.error(f"Twitch API request failed for {login}: {e}")
         return None
