@@ -60,9 +60,19 @@ async def handle_eventsub(request: web.Request):
 
     raw_body = await request.read()
 
+    logger.info(
+        f"🔔 EventSub request received — "
+        f"type={request.headers.get(MSG_TYPE_HEADER, 'MISSING')} "
+        f"size={len(raw_body)}b "
+        f"from={request.remote}"
+    )
+
     # ── Signature check ────────────────────────────────────────
     if not _verify_signature(request, raw_body):
-        logger.warning("Rejected EventSub request — bad signature")
+        logger.warning(
+            f"🔴 Rejected EventSub request — bad signature. "
+            f"Check TWITCH_EVENTSUB_SECRET matches what was used during subscription."
+        )
         return web.Response(status=403, text="Forbidden")
 
     msg_type = request.headers.get(MSG_TYPE_HEADER, "")
@@ -87,18 +97,32 @@ async def handle_eventsub(request: web.Request):
 
     # ── Live event dispatch ────────────────────────────────────
     if msg_type == MSG_TYPE_NOTIFICATION:
-        event        = data.get("event", {})
-        sub_type     = data.get("subscription", {}).get("type", "")
+        event    = data.get("event", {})
+        sub_type = data.get("subscription", {}).get("type", "")
+        login    = event.get("broadcaster_user_login", "unknown")
+
+        logger.info(
+            f"🟢 EventSub notification — "
+            f"type={sub_type} streamer={login}"
+        )
 
         if sub_type == "stream.online":
-            request.app["bot"].loop.create_task(
-                handle_stream_online(_bot_instance, event)
-            )
+            if _bot_instance is None:
+                logger.error("🔴 _bot_instance is None — event dropped!")
+            else:
+                logger.info(f"🚀 Dispatching handle_stream_online for {login}")
+                request.app["bot"].loop.create_task(
+                    handle_stream_online(_bot_instance, event)
+                )
 
         elif sub_type == "stream.offline":
-            request.app["bot"].loop.create_task(
-                handle_stream_offline(_bot_instance, event)
-            )
+            if _bot_instance is None:
+                logger.error("🔴 _bot_instance is None — event dropped!")
+            else:
+                logger.info(f"⚫ Dispatching handle_stream_offline for {login}")
+                request.app["bot"].loop.create_task(
+                    handle_stream_offline(_bot_instance, event)
+                )
 
         else:
             logger.warning(f"Unhandled EventSub type: {sub_type}")
