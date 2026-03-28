@@ -208,13 +208,13 @@ class TwitchMonitor:
             }
 
             async with self.db_pool.acquire() as conn:
-                rows = await conn.fetch("SELECT broadcaster_id FROM streamers")
+                rows = await conn.fetch("SELECT twitch_user_id FROM streamers")
 
             wanted_types = ["stream.online", "stream.offline"]
             callback_url = self.eventsub_manager.callback_url
 
             for row in rows:
-                bid = row["broadcaster_id"]
+                bid = row["twitch_user_id"]
                 for event_type in wanted_types:
                     if (bid, event_type) not in active:
                         logger.info(
@@ -244,14 +244,14 @@ class TwitchMonitor:
         try:
             async with self.db_pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT broadcaster_id, twitch_login FROM streamers WHERE is_live = TRUE"
+                    "SELECT twitch_user_id, twitch_login FROM streamers WHERE is_live = TRUE"
                 )
 
             if not rows:
                 return
 
-            ids       = [r["broadcaster_id"] for r in rows]
-            login_map = {r["broadcaster_id"]: r["twitch_login"] for r in rows}
+            ids       = [r["twitch_user_id"] for r in rows]
+            login_map = {r["twitch_user_id"]: r["twitch_login"] for r in rows}
 
             live_ids = await self.twitch_api.check_streams_live(ids)
 
@@ -307,11 +307,11 @@ class TwitchMonitor:
         try:
             async with self.db_pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT broadcaster_id FROM streamers WHERE is_live = TRUE"
+                    "SELECT twitch_user_id FROM streamers WHERE is_live = TRUE"
                 )
 
             for row in rows:
-                bid = row["broadcaster_id"]
+                bid = row["twitch_user_id"]
 
                 current = await self.twitch_api.get_stream_metadata(bid)
                 if not current:
