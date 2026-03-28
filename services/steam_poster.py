@@ -13,7 +13,7 @@ import discord
 
 from services.steam import fetch_steam_discounts
 from services.diff_engine import diff_games
-from config import PLATFORM_COLORS, STEAM_UPDATE_INTERVAL, STEAM_MIN_DISCOUNT
+from constants import PLATFORM_COLORS, STEAM_UPDATE_INTERVAL, STEAM_MIN_DISCOUNT
 from db.guild_settings import get_guild_config
 
 logger = logging.getLogger("steam-poster")
