@@ -70,59 +70,89 @@ async def handle_stream_online(bot, event: dict):
     user_login = event["broadcaster_user_login"].lower()
     user_name  = event["broadcaster_user_name"]
 
-    logger.info(f"Stream online: {user_login}")
+    logger.info(
+        f"🚀 DEBUG event_router: handle_stream_online called",
+        extra={"extra_data": {"login": user_login, "event_keys": list(event.keys())}}
+    )
 
-    # ── Deduplication: skip if already flagged "Live" in Redis ──
+    # ── Deduplication ──────────────────────────────────────────
     existing_status = await redis_client.get(_status_key(user_login))
+    logger.info(f"🟡 DEBUG event_router: Redis status for {user_login} = {existing_status!r}")
+
     if existing_status == "live":
-        logger.info(f"Duplicate online event ignored for {user_login}")
+        logger.info(f"⚪ DEBUG event_router: duplicate event ignored for {user_login}")
         return
 
     await redis_client.set(_status_key(user_login), "live", ttl=LIVE_TTL)
+    logger.info(f"🟢 DEBUG event_router: Redis live flag set for {user_login}")
 
-    # ── Fetch Twitch stream metadata ────────────────────────────
+    # ── Fetch metadata ─────────────────────────────────────────
     stream = await get_cached_stream(user_login)
-    embed  = _build_live_embed(user_login, user_name, stream)
+    logger.info(
+        f"🟢 DEBUG event_router: stream metadata = "
+        f"title={stream.get('title') if stream else None} | "
+        f"game={stream.get('game_name') if stream else None}"
+    )
+    embed = _build_live_embed(user_login, user_name, stream)
 
-    # ── Send or edit per guild ──────────────────────────────────
+    # ── Per-guild dispatch ─────────────────────────────────────
+    logger.info(f"🟢 DEBUG event_router: iterating {len(bot.guilds)} guild(s)")
+
     for guild in bot.guilds:
 
         config = await get_guild_config(guild.id)
+        logger.info(
+            f"🟡 DEBUG event_router: guild={guild.name} | "
+            f"config={'found' if config else 'MISSING'} | "
+            f"announce_channel_id={config.get('announce_channel_id') if config else None}"
+        )
+
         if not config:
+            logger.warning(f"🔴 DEBUG event_router: no config for guild {guild.name} ({guild.id}) — skipping")
             continue
 
         channel = guild.get_channel(config.get("announce_channel_id"))
-        if not channel:
-            logger.warning(f"Announce channel not found for guild {guild.id}")
-            continue
+        logger.info(
+            f"🟡 DEBUG event_router: channel lookup → "
+            f"{'found: ' + str(channel) if channel else 'NOT FOUND in cache — trying fetch'}"
+        )
 
-        role     = guild.get_role(config.get("ping_role_id"))
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(config.get("announce_channel_id"))
+                logger.info(f"🟢 DEBUG event_router: channel fetched via API — {channel}")
+            except Exception as e:
+                logger.error(
+                    f"🔴 DEBUG event_router: channel {config.get('announce_channel_id')} "
+                    f"not found for guild {guild.name} — {e}"
+                )
+                continue
+
+        role      = guild.get_role(config.get("ping_role_id"))
         live_role = guild.get_role(config.get("live_role_id"))
-        content  = role.mention if (role and config.get("enable_ping")) else None
+        content   = role.mention if (role and config.get("enable_ping")) else None
 
         msg_key    = _msg_key(user_login, guild.id)
         stored_msg = await redis_client.get(msg_key)
 
         if stored_msg:
-            # Edit the existing notification instead of double-posting
             try:
                 msg_id  = int(stored_msg)
                 message = await channel.fetch_message(msg_id)
                 await message.edit(content=content, embed=embed)
-                logger.info(f"Edited existing notification for {user_login} in guild {guild.id}")
+                logger.info(f"✅ DEBUG event_router: edited existing embed for {user_login} in {guild.name}")
             except Exception as e:
-                logger.warning(f"Could not edit message, will re-send: {e}")
-                stored_msg = None   # fall through to send a fresh one
+                logger.warning(f"🟡 DEBUG event_router: could not edit message ({e}) — re-sending")
+                stored_msg = None
 
         if not stored_msg:
             try:
                 message = await channel.send(content=content, embed=embed)
                 await redis_client.set(msg_key, str(message.id), ttl=LIVE_TTL)
-                logger.info(f"Sent notification for {user_login} in guild {guild.id}")
+                logger.info(f"✅ DEBUG event_router: posted live notification for {user_login} in {guild.name}")
             except Exception as e:
-                logger.error(f"Send failed for guild {guild.id}: {e}")
+                logger.error(f"🔴 DEBUG event_router: send failed in {guild.name} — {e}")
 
-        # ── Live role assignment ────────────────────────────────
         if live_role:
             for member in guild.members:
                 if member.bot:
@@ -133,7 +163,7 @@ async def handle_stream_online(bot, event: dict):
                     try:
                         await member.add_roles(live_role)
                     except Exception as e:
-                        logger.error(f"Role assign failed for {member}: {e}")
+                        logger.error(f"🔴 DEBUG event_router: role assign failed for {member} — {e}")
 
 
 # ──────────────────────────────────────────────────────────────
