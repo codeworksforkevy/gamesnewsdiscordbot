@@ -56,10 +56,10 @@ class EventSubManager:
             "Content-Type":  "application/json",
         }
 
-    async def _existing_subscriptions(self, broadcaster_id: str) -> list[str]:
+    async def _existing_subscriptions(self, broadcaster_id: str, _retry: bool = True) -> list[str]:
         """
         Returns a list of subscription types already active for this broadcaster.
-        Prevents duplicate subscriptions.
+        Prevents duplicate subscriptions. Auto-refreshes token on 401.
         """
         try:
             async with self.session.get(
@@ -67,6 +67,11 @@ class EventSubManager:
                 headers=self._headers,
                 params={"broadcaster_user_id": broadcaster_id},
             ) as resp:
+                if resp.status == 401 and _retry:
+                    logger.warning("Got 401 on existing_subscriptions — refreshing token")
+                    if await self._refresh_token():
+                        return await self._existing_subscriptions(broadcaster_id, _retry=False)
+
                 if resp.status != 200:
                     body = await resp.text()
                     logger.warning(
@@ -86,14 +91,58 @@ class EventSubManager:
             logger.exception(f"Error fetching existing subscriptions: {e}")
             return []
 
+    async def _refresh_token(self) -> bool:
+        """
+        Fetches a new App Access Token using client credentials.
+        Called automatically when a 401 is received.
+        Returns True if token was refreshed successfully.
+        """
+        client_secret = os.getenv("TWITCH_CLIENT_SECRET")
+        if not self.client_id or not client_secret:
+            logger.error(
+                "Cannot refresh token — TWITCH_CLIENT_ID or "
+                "TWITCH_CLIENT_SECRET not set"
+            )
+            return False
+
+        try:
+            async with self.session.post(
+                "https://id.twitch.tv/oauth2/token",
+                params={
+                    "client_id":     self.client_id,
+                    "client_secret": client_secret,
+                    "grant_type":    "client_credentials",
+                },
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(f"Token refresh failed — HTTP {resp.status}: {body[:200]}")
+                    return False
+
+                data  = await resp.json()
+                token = data.get("access_token")
+                if not token:
+                    logger.error("Token refresh returned no access_token")
+                    return False
+
+                self.token = token
+                logger.info("✅ Twitch App Access Token refreshed automatically")
+                return True
+
+        except Exception as e:
+            logger.exception(f"Token refresh error: {e}")
+            return False
+
     async def _subscribe(
         self,
         event_type: str,
         broadcaster_user_id: str,
         callback_url: str,
+        _retry: bool = True,
     ) -> bool:
         """
         Creates a single EventSub subscription.
+        Automatically refreshes token on 401 and retries once.
         Returns True on success.
         """
         payload = {
@@ -115,6 +164,14 @@ class EventSubManager:
             ) as resp:
                 text = await resp.text()
 
+                # Auto-refresh token on 401 and retry once
+                if resp.status == 401 and _retry:
+                    logger.warning("Got 401 on subscribe — refreshing token and retrying")
+                    if await self._refresh_token():
+                        return await self._subscribe(
+                            event_type, broadcaster_user_id, callback_url, _retry=False
+                        )
+
                 if resp.status >= 300:
                     logger.error(
                         f"EventSub subscribe failed — "
@@ -126,7 +183,7 @@ class EventSubManager:
                 logger.info(
                     "EventSub subscribed",
                     extra={"extra_data": {
-                        "type":       event_type,
+                        "type":        event_type,
                         "broadcaster": broadcaster_user_id,
                     }},
                 )
