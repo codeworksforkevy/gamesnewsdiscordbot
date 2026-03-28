@@ -1,5 +1,5 @@
 """
-config/settings.py
+settings.py
 ────────────────────────────────────────────────────────────────
 Central configuration loader. All environment variable access for
 the entire bot flows through here — nowhere else should call
@@ -200,17 +200,31 @@ def load_config() -> AppConfig:
         guild_debug_id = get_env_int_optional("GUILD_DEBUG_ID"),
     )
 
-    # ── Twitch ──────────────────────────────────────────────────
+    # ── Twitch (optional — bot starts without these, Twitch features disabled) ─
     twitch_client_id = get_env("TWITCH_CLIENT_ID")
-    twitch_app_token = get_env("TWITCH_APP_TOKEN")
-    twitch_callback  = get_env("TWITCH_EVENTSUB_CALLBACK_URL")
-
-    if not twitch_client_id:
-        errors.append("TWITCH_CLIENT_ID is not set")
-    if not twitch_app_token:
-        errors.append("TWITCH_APP_TOKEN is not set")
+    twitch_app_token = get_env("TWITCH_ACCESS_TOKEN")
+    # Auto-derive callback URL from Railway's public domain if not set explicitly
+    twitch_callback = get_env("TWITCH_EVENTSUB_CALLBACK_URL")
     if not twitch_callback:
-        errors.append("TWITCH_EVENTSUB_CALLBACK_URL is not set")
+        railway_domain = get_env("RAILWAY_PUBLIC_DOMAIN")
+        if railway_domain:
+            twitch_callback = f"https://{railway_domain}/eventsub"
+            logger.info(f"TWITCH_EVENTSUB_CALLBACK_URL not set — derived from Railway domain: {twitch_callback}")
+
+    _twitch_missing = [
+        name for name, val in [
+            ("TWITCH_CLIENT_ID",             twitch_client_id),
+            ("TWITCH_ACCESS_TOKEN",          twitch_app_token),
+            ("TWITCH_EVENTSUB_CALLBACK_URL", twitch_callback),
+        ] if not val
+    ]
+    if _twitch_missing:
+        # Warn but don't block startup — free-games, polls etc. work without Twitch
+        logger.warning(
+            "Twitch integration disabled — missing env vars: "
+            + ", ".join(_twitch_missing)
+            + ". Set them in Railway to enable live stream tracking."
+        )
 
     twitch = TwitchConfig(
         client_id       = twitch_client_id or "",
