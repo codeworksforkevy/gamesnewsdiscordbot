@@ -1,35 +1,29 @@
 # startup.py
-#
-# FIX 1: Was calling app_state.require_db() which returns the Database
-#         object — then calling .fetchrow() on it which didn't exist.
-#         Now uses app_state.db.fetchrow() directly.
-# FIX 2: eventsub_manager is None in most setups — was crashing the
-#         entire guild loop when it wasn't available. Now continues
-#         gracefully without EventSub if it isn't configured.
-# FIX 3: Errors in one guild no longer silently swallow the exception
-#         detail — full message is now logged.
+
+import asyncio
+import logging
+import os
 
 import discord
-import logging
-import asyncio
 
 logger = logging.getLogger("startup")
 
 
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 # LIVE ROLE SETUP
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 
 async def ensure_live_role(guild: discord.Guild) -> discord.Role | None:
-    role = discord.utils.get(guild.roles, name="Live")
+    role = discord.utils.get(guild.roles, name="🔴 Live")
     if role:
         return role
 
     logger.info(f"Creating Live role in {guild.name}")
     try:
         return await guild.create_role(
-            name="Live",
-            color=discord.Color.from_rgb(145, 70, 255),
+            name="🔴 Live",
+            color=discord.Color(0x89CFF0),
+            hoist=True,
             mentionable=True,
             reason="Auto-created by Find a Curie bot",
         )
@@ -40,22 +34,41 @@ async def ensure_live_role(guild: discord.Guild) -> discord.Role | None:
     return None
 
 
-# ==================================================
+# ──────────────────────────────────────────────────────────────
+# CHANNEL LOOKUP
+# ──────────────────────────────────────────────────────────────
+
+async def _get_announce_channel(db, guild_id: int) -> int | None:
+    """Tries guild_configs first, falls back to guild_settings. Never raises."""
+    for table in ("guild_configs", "guild_settings"):
+        try:
+            row = await db.fetchrow(
+                f"SELECT announce_channel_id FROM {table} WHERE guild_id = $1",
+                guild_id,
+            )
+            if row and row["announce_channel_id"]:
+                return row["announce_channel_id"]
+        except Exception:
+            pass
+    return None
+
+
+# ──────────────────────────────────────────────────────────────
 # STARTUP SYNC
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 
 async def startup_sync(bot) -> None:
 
     logger.info("🚀 Startup sync started")
 
     app_state = bot.app_state
-    db        = app_state.db   # FIX: use db directly, not require_db()
+    db        = app_state.db
 
     if not db:
         logger.error("startup_sync: database not connected — skipping")
         return
 
-    # ── Guild cache warmup ─────────────────────────────────────────────────
+    # ── Guild cache warmup ─────────────────────────────────────
     try:
         await asyncio.wait_for(
             asyncio.gather(*[guild.chunk() for guild in bot.guilds]),
@@ -66,96 +79,67 @@ async def startup_sync(bot) -> None:
     except Exception as e:
         logger.warning(f"Guild chunking warning: {e}")
 
-    # ── Per-guild setup ────────────────────────────────────────────────────
+    # ── Per-guild setup ────────────────────────────────────────
     for guild in bot.guilds:
         try:
             logger.info(f"Processing guild: {guild.name} ({guild.id})")
 
-            # Load settings — check both table names (legacy + new)
-            settings = await db.fetchrow(
-                """
-                SELECT announce_channel_id FROM guild_configs
-                WHERE guild_id = $1
-                """,
-                guild.id,
-            )
+            channel_id = await _get_announce_channel(db, guild.id)
 
-            if not settings:
-                # Try legacy table
-                settings = await db.fetchrow(
-                    """
-                    SELECT announce_channel_id FROM guild_settings
-                    WHERE guild_id = $1
-                    """,
-                    guild.id,
-                )
-
-            if not settings or not settings["announce_channel_id"]:
-                logger.info(
-                    f"No announce channel configured for {guild.name} — "
-                    f"use /live set-channel to configure"
-                )
-                # Don't skip — still ensure Live role exists
+            if channel_id:
+                logger.info(f"{guild.name} → announce channel: {channel_id} ✅")
             else:
                 logger.info(
-                    f"{guild.name} → announce channel: {settings['announce_channel_id']}"
+                    f"No announce channel configured for {guild.name} "
+                    f"— use /live set-channel to configure"
                 )
 
-            # Ensure Live role exists
-            live_role = await ensure_live_role(guild)
-            if live_role:
-                if not hasattr(app_state, "live_roles"):
-                    app_state.live_roles = {}
-                app_state.live_roles[guild.id] = live_role.id
+            # Live role
+            try:
+                live_role = await ensure_live_role(guild)
+                if live_role:
+                    if not hasattr(app_state, "live_roles"):
+                        app_state.live_roles = {}
+                    app_state.live_roles[guild.id] = live_role.id
+            except Exception as e:
+                logger.error(f"Live role setup failed in {guild.name}: {e}")
 
-            # Fetch tracked streamers
-            streamers = await db.fetch(
-                """
-                SELECT twitch_user_id, twitch_login
-                FROM streamers
-                WHERE guild_id = $1
-                """,
-                guild.id,
-            )
+            # Tracked streamers
+            try:
+                streamers = await db.fetch(
+                    "SELECT twitch_user_id, twitch_login FROM streamers WHERE guild_id = $1",
+                    guild.id,
+                )
+                logger.info(f"{guild.name} → {len(streamers)} streamer(s) tracked")
+            except Exception as e:
+                logger.warning(f"Could not fetch streamers for {guild.name}: {e}")
+                streamers = []
 
-            logger.info(f"{guild.name} → {len(streamers)} streamer(s) tracked")
-
-            # ── EventSub subscriptions (optional) ─────────────────────────
+            # EventSub (optional)
             eventsub = getattr(app_state, "eventsub_manager", None)
 
             if eventsub:
-                for s in streamers:
-                    broadcaster_id = s["twitch_user_id"]
-                    twitch_login   = s["twitch_login"]
-                    try:
-                        # Resolve callback URL: config → env var → Railway domain
-                        webhook_url = (
-                            app_state.get_config("webhook_url")
-                            or __import__("os").getenv("TWITCH_EVENTSUB_CALLBACK_URL")
-                        )
-                        if not webhook_url:
-                            railway = __import__("os").getenv("RAILWAY_PUBLIC_DOMAIN")
-                            if railway:
-                                webhook_url = f"https://{railway}/eventsub"
-                        if not webhook_url:
-                            logger.warning(
-                                f"No callback URL available for EventSub — "
-                                f"set TWITCH_EVENTSUB_CALLBACK_URL in Railway"
-                            )
-                            continue
-                        await eventsub.ensure_subscriptions(
-                            broadcaster_id, webhook_url
-                        )
-                        logger.info(f"EventSub subscribed: {twitch_login}")
-                    except Exception as e:
-                        logger.warning(
-                            f"EventSub subscription failed for {twitch_login}: {e}"
-                        )
-            else:
-                logger.info(
-                    "EventSub manager not configured — "
-                    "using StreamMonitor polling instead"
+                callback_url = (
+                    os.getenv("TWITCH_EVENTSUB_CALLBACK_URL")
+                    or (
+                        f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}/eventsub"
+                        if os.getenv("RAILWAY_PUBLIC_DOMAIN") else None
+                    )
                 )
+
+                if not callback_url:
+                    logger.warning("No EventSub callback URL configured")
+                else:
+                    for s in streamers:
+                        try:
+                            await eventsub.ensure_subscriptions(
+                                s["twitch_user_id"], callback_url
+                            )
+                            logger.info(f"EventSub subscribed: {s['twitch_login']}")
+                        except Exception as e:
+                            logger.warning(f"EventSub failed for {s['twitch_login']}: {e}")
+            else:
+                logger.info("EventSub not configured — using StreamMonitor polling")
 
         except Exception as e:
             logger.error(
