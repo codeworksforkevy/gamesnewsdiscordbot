@@ -1,20 +1,19 @@
 # commands/live_commands.py
 
-import asyncio
-import logging
-from datetime import datetime, timezone
-
 import discord
 from discord import app_commands
+import logging
+import asyncio
+from datetime import datetime, timezone
 
 from core.event_bus import event_bus
 
 logger = logging.getLogger("live-commands")
 
 
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 # EMBED BUILDERS
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 
 def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     login      = stream.get("user_login") or user.get("login", "unknown")
@@ -35,18 +34,15 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
             pass
 
     raw_thumb = stream.get("thumbnail_url", "")
-    thumbnail = (
-        raw_thumb.replace("{width}", "1280").replace("{height}", "720")
-        + f"?t={int(datetime.now(timezone.utc).timestamp())}"   # cache-bust
-    )
+    thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
 
     embed = discord.Embed(
         title=title,
         url=stream_url,
         description=(
-            f"👾 **{name}** is live on Twitch!\n\n"
+            f"**{name}** is live on Twitch!\n\n"
             f"🎮 **{game}**\n"
-            f"🖥️ **{viewers:,}** viewers"
+            f"👀 **{viewers:,}** viewers"
             f"{started_str}"
         ),
         color=0x9146FF,
@@ -68,27 +64,26 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
 def build_offline_embed(login: str, display_name: str) -> discord.Embed:
     now_ts = int(datetime.now(timezone.utc).timestamp())
     embed = discord.Embed(
-        title=f"🖥️ {display_name} is now offline",
+        title=f"{display_name} is now offline",
         description=f"Stream ended <t:{now_ts}:R>",
         color=0x808080,
     )
-    embed.set_footer(text="⚫ Stream ended — see you next time!")
+    embed.set_footer(text="⚫ Stream ended")
     return embed
 
 
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 # LIVE ROLE HELPERS
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 
 async def ensure_live_role(guild: discord.Guild) -> discord.Role | None:
-    role = discord.utils.get(guild.roles, name="🔴 Live")
+    role = discord.utils.get(guild.roles, name="Live")
     if role:
         return role
     try:
         role = await guild.create_role(
-            name="🔴 Live",
-            color=discord.Color(0x89CFF0),   # baby blue
-            hoist=True,
+            name="Live",
+            color=discord.Color.from_rgb(145, 70, 255),
             mentionable=True,
             reason="Auto-created by Find a Curie bot",
         )
@@ -108,8 +103,6 @@ async def assign_live_role(guild: discord.Guild, twitch_login: str) -> None:
         return
     login_lower = twitch_login.lower()
     for member in guild.members:
-        if member.bot:
-            continue
         checks = [
             member.name.lower(),
             (member.nick or "").lower(),
@@ -126,13 +119,11 @@ async def assign_live_role(guild: discord.Guild, twitch_login: str) -> None:
 
 
 async def remove_live_role(guild: discord.Guild, twitch_login: str) -> None:
-    role = discord.utils.get(guild.roles, name="🔴 Live")
+    role = discord.utils.get(guild.roles, name="Live")
     if not role:
         return
     login_lower = twitch_login.lower()
     for member in guild.members:
-        if member.bot:
-            continue
         checks = [
             member.name.lower(),
             (member.nick or "").lower(),
@@ -148,9 +139,9 @@ async def remove_live_role(guild: discord.Guild, twitch_login: str) -> None:
                 logger.error(f"Role remove error for {member}: {e}")
 
 
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 # STREAM MONITOR
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 
 class StreamMonitor:
 
@@ -187,7 +178,7 @@ class StreamMonitor:
 
         try:
             rows = await self.db.fetch(
-                "SELECT DISTINCT twitch_login, twitch_user_id FROM streamers"
+                "SELECT DISTINCT twitch_login, broadcaster_id FROM streamers"
             )
         except Exception as e:
             logger.error(f"StreamMonitor DB fetch failed: {e}")
@@ -210,6 +201,8 @@ class StreamMonitor:
             login = row["twitch_login"].lower()
 
             try:
+                # FIX: check BOTH guild_settings and guild_configs so
+                # announce channel is found regardless of which table was used.
                 guild_rows = await self.db.fetch(
                     """
                     SELECT s.guild_id,
@@ -293,7 +286,7 @@ class StreamMonitor:
             user_info = await self._get_user(stream.get("user_login", ""))
             await msg.edit(embed=build_live_embed(stream, user_info))
             self._state[state_key]["title"] = new_title
-            logger.info(f"Updated title in {guild.name}: {new_title!r}")
+            logger.info(f"{login} updated title in {guild.name}: {new_title!r}")
         except discord.NotFound:
             self._state.pop(state_key, None)
         except Exception as e:
@@ -315,9 +308,9 @@ class StreamMonitor:
         await remove_live_role(guild, login)
 
 
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 # HELPERS
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 
 async def _get_announce_channel_id(db, guild_id: int) -> int | None:
     try:
@@ -336,9 +329,9 @@ async def _get_announce_channel_id(db, guild_id: int) -> int | None:
         return None
 
 
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 # REGISTER
-# ──────────────────────────────────────────────────────────────
+# ==================================================
 
 async def register(bot, app_state, session):
 
@@ -350,11 +343,11 @@ async def register(bot, app_state, session):
 
     group = app_commands.Group(
         name="live",
-        description="📡 Manage Twitch live stream tracking",
+        description="Manage Twitch live stream tracking",
     )
 
-    # ── /live add ─────────────────────────────────────────────
-    @group.command(name="add", description="👾 Track a Twitch streamer")
+    # ── /live add ──────────────────────────────────────────────────────────
+    @group.command(name="add", description="Track a Twitch streamer's live streams")
     @app_commands.describe(twitch_login="Twitch username to track (e.g. pokimane)")
     async def add_streamer(interaction: discord.Interaction, twitch_login: str):
 
@@ -365,7 +358,7 @@ async def register(bot, app_state, session):
             user = await app_state.twitch_api.get_user_by_login(twitch_login)
             if not user:
                 return await interaction.followup.send(
-                    f"❌ Twitch user **{twitch_login}** not found. Double-check the spelling.",
+                    f"❌ Twitch user **{twitch_login}** not found. Check the spelling.",
                 )
 
             twitch_user_id = user["id"]
@@ -378,12 +371,12 @@ async def register(bot, app_state, session):
             )
             if existing:
                 return await interaction.followup.send(
-                    f"⚠️ **{display_name}** is already being tracked in this server.",
+                    f"⚠️ **{display_name}** is already tracked in this server.",
                 )
 
             await db.execute(
                 """
-                INSERT INTO streamers (twitch_user_id, twitch_login, guild_id)
+                INSERT INTO streamers (broadcaster_id, twitch_login, guild_id)
                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
                 """,
                 twitch_user_id, twitch_login, interaction.guild_id,
@@ -401,18 +394,18 @@ async def register(bot, app_state, session):
             embed = discord.Embed(
                 title="✅ Streamer Added",
                 description=(
-                    f"**{display_name}** is now being tracked.\n"
+                    f"**{display_name}** is now tracked.\n"
                     + (
                         "🔴 **They're live right now!** Posting notification..."
                         if is_live_now else
-                        "💤 They're offline right now — you'll get a notification when they go live."
+                        "You'll get a notification when they go live."
                     )
                 ),
                 color=0x2ECC71,
             )
             if profile_image:
                 embed.set_thumbnail(url=profile_image)
-            embed.set_footer(text="💡 Use /live list to see all tracked streamers")
+            embed.set_footer(text="Use /live list to see all tracked streamers")
 
             await interaction.followup.send(embed=embed)
 
@@ -433,8 +426,8 @@ async def register(bot, app_state, session):
             logger.exception("add_streamer failed")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-    # ── /live remove ──────────────────────────────────────────
-    @group.command(name="remove", description="🗑️ Stop tracking a Twitch streamer")
+    # ── /live remove ───────────────────────────────────────────────────────
+    @group.command(name="remove", description="Stop tracking a Twitch streamer")
     @app_commands.describe(twitch_login="Twitch username to stop tracking")
     async def remove_streamer(interaction: discord.Interaction, twitch_login: str):
 
@@ -448,7 +441,7 @@ async def register(bot, app_state, session):
             )
             if result == "DELETE 0":
                 return await interaction.followup.send(
-                    f"❌ **{twitch_login}** isn't being tracked in this server.",
+                    f"❌ **{twitch_login}** isn't tracked in this server.",
                 )
 
             await event_bus.emit("streamer_removed", {
@@ -461,15 +454,14 @@ async def register(bot, app_state, session):
                 description=f"**{twitch_login}** has been removed from tracking.",
                 color=0xE74C3C,
             )
-            embed.set_footer(text="💡 Use /live list to see remaining tracked streamers")
             await interaction.followup.send(embed=embed)
 
         except Exception:
             logger.exception("remove_streamer failed")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-    # ── /live list ────────────────────────────────────────────
-    @group.command(name="list", description="📋 List all tracked streamers in this server")
+    # ── /live list ─────────────────────────────────────────────────────────
+    @group.command(name="list", description="List all tracked streamers in this server")
     async def list_streamers(interaction: discord.Interaction):
 
         await interaction.response.defer(ephemeral=True)
@@ -477,41 +469,29 @@ async def register(bot, app_state, session):
         try:
             rows = await db.fetch(
                 """
-                SELECT s.twitch_login, ss.is_live
-                FROM streamers s
-                LEFT JOIN streamer_states ss ON ss.twitch_user_id = s.twitch_user_id
-                WHERE s.guild_id = $1
-                ORDER BY ss.is_live DESC NULLS LAST, s.twitch_login ASC
+                SELECT twitch_login FROM streamers
+                WHERE guild_id = $1 ORDER BY twitch_login ASC
                 """,
                 interaction.guild_id,
             )
 
             if not rows:
                 return await interaction.followup.send(
-                    "📭 No streamers tracked yet. Use `/live add` to get started!",
+                    "📭 No streamers tracked yet. Use `/live add` to add one!",
                 )
 
-            lines = []
-            for r in rows:
-                login     = r["twitch_login"]
-                is_live   = r.get("is_live", False)
-                indicator = "🔴" if is_live else "⚫"
-                lines.append(
-                    f"{indicator} [{login}](https://www.twitch.tv/{login})"
-                )
-
-            live_count = sum(1 for r in rows if r.get("is_live"))
-            total      = len(rows)
+            lines = [
+                f"• [{r['twitch_login']}](https://www.twitch.tv/{r['twitch_login']})"
+                for r in rows
+            ]
 
             embed = discord.Embed(
                 title=f"📡 Tracked Streamers — {interaction.guild.name}",
                 description="\n".join(lines),
                 color=0x9146FF,
             )
-            embed.set_footer(
-                text=f"🖥️ {total} streamer{'s' if total != 1 else ''} tracked"
-                     + (f" • 🔴 {live_count} live now" if live_count else "")
-            )
+            count = len(rows)
+            embed.set_footer(text=f"{count} streamer{'s' if count != 1 else ''} tracked")
 
             await interaction.followup.send(embed=embed)
 
@@ -519,12 +499,12 @@ async def register(bot, app_state, session):
             logger.exception("list_streamers failed")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-    # ── /live set-channel ─────────────────────────────────────
+    # ── /live set-channel ──────────────────────────────────────────────────
     @group.command(
         name="set-channel",
-        description="📺 Set the channel for live notifications (admin only)",
+        description="Set the channel where live notifications are posted (admin only)",
     )
-    @app_commands.describe(channel="Channel to post live notifications in")
+    @app_commands.describe(channel="The channel to post live notifications in")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_channel(
         interaction: discord.Interaction,
@@ -547,13 +527,13 @@ async def register(bot, app_state, session):
             embed = discord.Embed(
                 title="✅ Stream channel set",
                 description=(
-                    f"🖥️ Live stream notifications will now appear in {channel.mention}.\n\n"
-                    f"Make sure I have **Send Messages** and **Embed Links** "
+                    f"Live stream notifications will now be posted in {channel.mention}.\n\n"
+                    f"Make sure the bot has **Send Messages** and **Embed Links** "
                     f"permissions in that channel."
                 ),
                 color=0x2ECC71,
             )
-            embed.set_footer(text="💡 Use /live set-games-channel to set the games channel")
+            embed.set_footer(text="Use /live set-games-channel to set the games channel")
             await interaction.followup.send(embed=embed)
 
         except Exception:
@@ -564,14 +544,14 @@ async def register(bot, app_state, session):
     async def set_channel_error(interaction: discord.Interaction, error):
         if isinstance(error, app_commands.MissingPermissions):
             await interaction.response.send_message(
-                "🔒 You need the **Manage Server** permission to use this command.",
+                "❌ You need the **Manage Server** permission to use this command.",
                 ephemeral=True,
             )
 
-    # ── /live set-games-channel ───────────────────────────────
+    # ── /live set-games-channel ────────────────────────────────────────────
     @group.command(
         name="set-games-channel",
-        description="🎮 Set the channel for free games and deals (admin only)",
+        description="Set the channel for free game and deals posts (admin only)",
     )
     @app_commands.describe(channel="Channel to post free games and deals in")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -597,13 +577,13 @@ async def register(bot, app_state, session):
             embed = discord.Embed(
                 title="✅ Games channel set",
                 description=(
-                    f"🎮 Free games, Steam deals and Prime Gaming posts will now "
+                    f"Free games, Steam deals and Prime Gaming posts will now "
                     f"appear in {channel.mention}.\n\n"
-                    f"🖥️ Stream live notifications still go to your stream channel."
+                    f"Stream live notifications will still go to your stream channel."
                 ),
                 color=0x2ECC71,
             )
-            embed.set_footer(text="💡 Use /live set-channel to change the stream channel")
+            embed.set_footer(text="Use /live set-channel to change the stream channel")
             await interaction.followup.send(embed=embed)
 
         except Exception:
@@ -616,12 +596,12 @@ async def register(bot, app_state, session):
     async def set_games_channel_error(interaction: discord.Interaction, error):
         if isinstance(error, app_commands.MissingPermissions):
             await interaction.response.send_message(
-                "🔒 You need the **Manage Server** permission to use this command.",
+                "❌ You need the **Manage Server** permission to use this command.",
                 ephemeral=True,
             )
 
-    # ── /live stats ───────────────────────────────────────────
-    @group.command(name="stats", description="📊 View stream activity for tracked streamers")
+    # ── /live stats ────────────────────────────────────────────────────────
+    @group.command(name="stats", description="View stream activity for tracked streamers")
     async def live_stats(interaction: discord.Interaction):
 
         await interaction.response.defer(ephemeral=True)
@@ -655,7 +635,7 @@ async def register(bot, app_state, session):
 
             if not rows:
                 return await interaction.followup.send(
-                    "📭 No streamers tracked yet. Use `/live add` to get started!",
+                    "📭 No streamers are being tracked yet. Use `/live add` to add one!",
                 )
 
             embed = discord.Embed(
@@ -672,7 +652,7 @@ async def register(bot, app_state, session):
                     avg_viewers = int(row["avg_viewers"] or 0)
                     last_seen   = row["last_seen"]
 
-                    last_str = "Never streamed"
+                    last_str = "Never"
                     if last_seen:
                         try:
                             if isinstance(last_seen, str):
@@ -686,11 +666,11 @@ async def register(bot, app_state, session):
 
                     value = (
                         f"📺 **{count}** stream{'s' if count != 1 else ''} tracked\n"
-                        f"🖥️ Avg **{avg_viewers:,}** viewers\n"
+                        f"👀 Avg **{avg_viewers:,}** viewers\n"
                         f"🕐 Last seen {last_str}"
                     )
                 else:
-                    value = "💤 No history yet — stats build up over time."
+                    value = "No history yet — stats build up over time."
 
                 embed.add_field(
                     name=f"[{login}]({url})",
@@ -700,7 +680,7 @@ async def register(bot, app_state, session):
 
             if not has_history:
                 embed.set_footer(
-                    text="💡 Full stats appear once stream history is recorded."
+                    text="Full stats will appear once stream history is recorded."
                 )
 
             await interaction.followup.send(embed=embed)
@@ -709,5 +689,6 @@ async def register(bot, app_state, session):
             logger.exception("live_stats failed")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
+    # ── Register group ─────────────────────────────────────────────────────
     bot.tree.add_command(group)
     logger.info("live_commands registered")
