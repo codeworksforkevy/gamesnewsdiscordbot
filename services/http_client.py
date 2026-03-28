@@ -1,74 +1,74 @@
-import aiohttp
+# services/http_client.py
+
 import asyncio
-import random
 import logging
+import random
+
+import aiohttp
 
 logger = logging.getLogger("http")
+
+MAX_ATTEMPTS = 5
+BACKOFF_MAX  = 30
 
 
 class HTTPClientManager:
 
     def __init__(self):
-        self._session = None
+        self._session: aiohttp.ClientSession | None = None
 
-    async def start(self):
+    async def start(self) -> None:
         if not self._session:
-            timeout = aiohttp.ClientTimeout(total=20)
-            self._session = aiohttp.ClientSession(timeout=timeout)
-            logger.info("HTTP session started")
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=20)
+            )
+            logger.info("HTTP session başlatıldı")
 
-    async def close(self):
+    async def close(self) -> None:
         if self._session:
             await self._session.close()
             self._session = None
-            logger.info("HTTP session closed")
+            logger.info("HTTP session kapatıldı")
 
     @property
-    def session(self):
+    def session(self) -> aiohttp.ClientSession | None:
         return self._session
 
-    async def request(self, method, url, **kwargs):
-
+    async def request(self, method: str, url: str, **kwargs):
         if not self._session:
-            raise RuntimeError("HTTP session not started")
+            raise RuntimeError("HTTP session başlatılmamış — önce start() çağır")
 
         backoff = 1
 
-        for attempt in range(5):
-
+        for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 async with self._session.request(method, url, **kwargs) as r:
-
                     if r.status == 429 or 500 <= r.status < 600:
+                        wait = min(backoff + random.random(), BACKOFF_MAX)
                         logger.warning(
-                            "HTTP %s retry (%s) for %s",
-                            r.status,
-                            attempt + 1,
-                            url
+                            f"HTTP {r.status} — deneme {attempt}/{MAX_ATTEMPTS} "
+                            f"— {wait:.1f}s — {url}"
                         )
-                        await asyncio.sleep(backoff + random.random())
-                        backoff *= 2
+                        await asyncio.sleep(wait)
+                        backoff = min(backoff * 2, BACKOFF_MAX)
                         continue
-
-                    # Try JSON first
                     try:
                         return await r.json()
                     except aiohttp.ContentTypeError:
-                        text = await r.text()
-                        logger.warning("Non-JSON response from %s", url)
-                        return text
-
+                        return await r.text()
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.warning(
-                    "HTTP exception (%s) retry (%s) for %s",
-                    e,
-                    attempt + 1,
-                    url
-                )
-                await asyncio.sleep(backoff + random.random())
-                backoff *= 2
+                wait = min(backoff + random.random(), BACKOFF_MAX)
+                logger.warning(f"HTTP {e.__class__.__name__} — deneme {attempt} — {url}")
+                await asyncio.sleep(wait)
+                backoff = min(backoff * 2, BACKOFF_MAX)
 
-        raise RuntimeError(f"HTTP retries exhausted for {url}")
+        raise RuntimeError(f"HTTP {MAX_ATTEMPTS} denemeden sonra başarısız: {url}")
+
+    async def get(self, url: str, **kwargs):
+        return await self.request("GET", url, **kwargs)
+
+    async def post(self, url: str, **kwargs):
+        return await self.request("POST", url, **kwargs)
 
 
 http_client = HTTPClientManager()
