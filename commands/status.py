@@ -15,7 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from event_router import get_stream_status
+from services.event_router import get_stream_status
 
 logger = logging.getLogger("status_command")
 
