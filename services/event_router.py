@@ -194,13 +194,25 @@ async def get_stream_status(user_login: str) -> dict | None:
     """
     Returns a dict with stream info if the streamer is currently live,
     or None if they are offline.
-    Checks Redis first; falls back to Twitch API via get_cached_stream.
+
+    Priority:
+    1. Redis live flag (set by handle_stream_online) — instant
+    2. Twitch API direct check — fallback when Redis has no flag yet
+       (e.g. bot just restarted, StreamMonitor hasn't polled yet)
     """
     user_login = user_login.lower()
     status     = await redis_client.get(_status_key(user_login))
 
-    if status != "live":
-        return None
+    if status == "live":
+        stream = await get_cached_stream(user_login)
+        return stream
 
-    stream = await get_cached_stream(user_login)
-    return stream   # may still be None if Twitch API is slow; caller handles that
+    # Redis has no flag — ask Twitch API directly
+    try:
+        stream = await get_cached_stream(user_login)
+        if stream:
+            return stream
+    except Exception:
+        pass
+
+    return None
