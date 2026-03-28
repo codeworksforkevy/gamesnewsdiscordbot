@@ -236,10 +236,10 @@ async def on_ready() -> None:
     )
 
     # ── Slash command sync ──────────────────────────────────────
-    # Always sync on startup — safe to do once per deploy.
-    # Only hits Discord's 429 rate limit if restarted >200 times/day.
-    # Set SYNC_COMMANDS=false to skip (e.g. during rapid crash-loop restarts).
-    if os.getenv("SYNC_COMMANDS", "true").lower() != "false":
+    # Only syncs when SYNC_COMMANDS=true to avoid Discord 429 rate limits.
+    # Set SYNC_COMMANDS=true in Railway once after adding new commands,
+    # then remove it (or set false) for normal restarts.
+    if os.getenv("SYNC_COMMANDS", "false").lower() == "true":
         try:
             synced = await bot.tree.sync()
             logger.info(
@@ -249,7 +249,7 @@ async def on_ready() -> None:
         except Exception as e:
             logger.error(f"Slash command sync failed: {e}", exc_info=True)
     else:
-        logger.info("Slash command sync skipped (SYNC_COMMANDS=false)")
+        logger.info("Slash command sync skipped — set SYNC_COMMANDS=true to sync")
 
     # ── Load channel registry ───────────────────────────────────
     try:
@@ -387,6 +387,19 @@ async def main() -> None:
 
         from services.twitch_api import TwitchAPI
         app_state.twitch_api = TwitchAPI(session)
+
+        # ── EventSub Manager ────────────────────────────────────────────────
+        # Only initialise if Twitch credentials are available
+        try:
+            from services.eventsub_manager import EventSubManager
+            app_state.eventsub_manager = EventSubManager(session)
+            logger.info("EventSubManager initialised")
+        except Exception as e:
+            logger.warning(
+                f"EventSubManager not initialised ({e}) — "
+                f"falling back to StreamMonitor polling"
+            )
+            app_state.eventsub_manager = None
 
         # ── Cogs ────────────────────────────────────────────────
         await bot.load_extension("cogs.live_role_cog")
