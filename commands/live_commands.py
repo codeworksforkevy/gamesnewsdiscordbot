@@ -163,14 +163,19 @@ class StreamMonitor:
 
     async def _loop(self):
         await self.bot.wait_until_ready()
-        logger.info("StreamMonitor: polling begins")
+        logger.info("🟢 StreamMonitor: polling begins — interval=60s")
+        cycle = 0
         while True:
+            cycle += 1
+            logger.info(f"🔄 StreamMonitor: cycle #{cycle} starting")
             try:
                 await self._poll()
             except asyncio.CancelledError:
+                logger.info("StreamMonitor: cancelled")
                 break
             except Exception as e:
-                logger.exception(f"StreamMonitor poll error: {e}")
+                logger.exception(f"🔴 StreamMonitor: cycle #{cycle} crashed — {e}")
+            logger.info(f"🔄 StreamMonitor: cycle #{cycle} done — sleeping 60s")
             await asyncio.sleep(60)
 
     async def _poll(self):
