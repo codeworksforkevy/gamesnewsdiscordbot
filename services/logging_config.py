@@ -1,5 +1,5 @@
 """
-logging_config.py
+services/logging_config.py
 ────────────────────────────────────────────────────────────────
 Centralised logging setup.
 
