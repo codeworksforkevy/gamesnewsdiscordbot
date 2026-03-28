@@ -249,12 +249,24 @@ class LiveRoleCog(commands.Cog):
     async def on_ready(self) -> None:
         """Pre-creates the Live role in every guild on startup."""
         for guild in self.bot.guilds:
-            await self._get_or_create_live_role(guild)
+            try:
+                await self._get_or_create_live_role(guild)
+            except Exception as e:
+                logger.error(
+                    f"Live role setup failed for {guild.name}: {e}",
+                    extra={"extra_data": {"guild_id": guild.id, "error": str(e)}},
+                )
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Creates the Live role when the bot joins a new guild."""
-        await self._get_or_create_live_role(guild)
+        try:
+            await self._get_or_create_live_role(guild)
+        except Exception as e:
+            logger.error(
+                f"Live role setup failed on guild join {guild.name}: {e}",
+                extra={"extra_data": {"guild_id": guild.id, "error": str(e)}},
+            )
 
 
 # ──────────────────────────────────────────────────────────────
