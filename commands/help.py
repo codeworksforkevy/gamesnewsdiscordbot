@@ -1,23 +1,19 @@
 # commands/help.py
-#
-# UX: Dutch/English language toggle button.
-# Embed starts in English. A button swaps to Dutch (and back).
-# Half the length, twice as clean.
 
 import discord
 from discord import app_commands
 
 
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 # EMBED BUILDERS
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 
 def _build_embed(lang: str) -> discord.Embed:
 
     is_nl = lang == "nl"
 
     embed = discord.Embed(
-        title="📚 Find a Curie — Command Guide",
+        title="🖥️ Find a Curie — Command Guide",
         color=0x9146FF,
     )
 
@@ -25,7 +21,7 @@ def _build_embed(lang: str) -> discord.Embed:
         embed.add_field(
             name="🟣 Live tracking",
             value=(
-                "Volg Twitch-creators en ontvang realtime live meldingen.\n"
+                "Volg Twitch-creators en ontvang realtime meldingen.\n"
                 "`/live add` • `/live remove` • `/live list` • `/live set-channel`"
             ),
             inline=False,
@@ -33,15 +29,15 @@ def _build_embed(lang: str) -> discord.Embed:
         embed.add_field(
             name="🎮 Gratis games",
             value=(
-                "Bekijk actuele gratis games van Epic Games, Steam, GOG en Humble Bundle.\n"
+                "Actuele gratis games van Epic, Steam, GOG en Humble Bundle.\n"
                 "`/freegames` • `/game_discounts`"
             ),
             inline=False,
         )
         embed.add_field(
-            name="🌙 Amazon Luna membership",
+            name="🌙 Amazon Luna",
             value=(
-                "Updates over gratis games via Amazon Prime Gaming / Luna+.\n"
+                "Gratis games via Amazon Prime Gaming / Luna+.\n"
                 "`/membership_exclusives`"
             ),
             inline=False,
@@ -54,7 +50,7 @@ def _build_embed(lang: str) -> discord.Embed:
         embed.add_field(
             name="🔔 Persoonlijke meldingen",
             value=(
-                "Ontvang een DM wanneer een streamer live gaat — zonder de hele server te pingen.\n"
+                "Ontvang een DM wanneer een streamer live gaat.\n"
                 "`/notify add` • `/notify remove` • `/notify list`"
             ),
             inline=False,
@@ -65,14 +61,14 @@ def _build_embed(lang: str) -> discord.Embed:
             inline=False,
         )
         embed.add_field(
-            name="🛠 Hulpmiddelen",
+            name="🛠️ Hulpmiddelen",
             value=(
                 "Handige tools voor dagelijks Discord-gebruik.\n"
-                "`/convert` • `/poll` • `/reminder` • `/timestamp` • `/register`"
+                "`/util convert` • `/util poll` • `/util reminder` • `/util timestamp`"
             ),
             inline=False,
         )
-        embed.set_footer(text="Hulp nodig? Vraag het aan Sim. • 🇳🇱 Nederlands")
+        embed.set_footer(text="💬 Hulp nodig? Vraag het aan Sim. • 🇳🇱 Nederlands")
     else:
         embed.add_field(
             name="🟣 Live tracking",
@@ -85,15 +81,15 @@ def _build_embed(lang: str) -> discord.Embed:
         embed.add_field(
             name="🎮 Free games",
             value=(
-                "View free games and limited-time offers from Epic Games, Steam, GOG and Humble Bundle.\n"
+                "Current free games from Epic Games, Steam, GOG and Humble Bundle.\n"
                 "`/freegames` • `/game_discounts`"
             ),
             inline=False,
         )
         embed.add_field(
-            name="🌙 Amazon Luna membership",
+            name="🌙 Amazon Luna",
             value=(
-                "Get updates on free games via Amazon Prime Gaming / Luna+.\n"
+                "Free games via Amazon Prime Gaming / Luna+.\n"
                 "`/membership_exclusives`"
             ),
             inline=False,
@@ -106,7 +102,7 @@ def _build_embed(lang: str) -> discord.Embed:
         embed.add_field(
             name="🔔 Personal notifications",
             value=(
-                "Receive a DM when a streamer goes live — without pinging the whole server.\n"
+                "Get a DM when a streamer goes live — no server ping.\n"
                 "`/notify add` • `/notify remove` • `/notify list`"
             ),
             inline=False,
@@ -117,21 +113,21 @@ def _build_embed(lang: str) -> discord.Embed:
             inline=False,
         )
         embed.add_field(
-            name="🛠 Utilities",
+            name="🛠️ Utilities",
             value=(
-                "Helpful tools for everyday Discord use.\n"
-                "`/convert` • `/poll` • `/reminder` • `/timestamp` • `/register`"
+                "Handy tools for everyday Discord use.\n"
+                "`/util convert` • `/util poll` • `/util reminder` • `/util timestamp`"
             ),
             inline=False,
         )
-        embed.set_footer(text="Need help? Ask Sim. • 🇬🇧 English")
+        embed.set_footer(text="💬 Need help? Ask Sim. • 🇬🇧 English")
 
     return embed
 
 
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 # LANGUAGE TOGGLE VIEW
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 
 class LanguageToggle(discord.ui.View):
     """Button that swaps the embed between English and Dutch."""
@@ -158,13 +154,13 @@ class LanguageToggle(discord.ui.View):
             item.disabled = True
 
 
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 # REGISTER
-# ==================================================
+# ──────────────────────────────────────────────────────────────
 
 async def register(bot, app_state, session):
 
-    @bot.tree.command(name="help", description="View the Find a Curie command guide")
+    @bot.tree.command(name="help", description="👾 View the Find a Curie command guide")
     async def help_command(interaction: discord.Interaction):
         await interaction.response.send_message(
             embed=_build_embed("en"),
