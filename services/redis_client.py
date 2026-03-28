@@ -152,3 +152,58 @@ class RedisClient:
             return await self.redis.ping()
         except Exception:
             return False
+
+
+# ──────────────────────────────────────────────────────────────
+# MODULE-LEVEL SINGLETON PROXY
+# ──────────────────────────────────────────────────────────────
+# Several modules (event_router, twitch_cache, stream_events) import:
+#   from services.redis_client import redis_client
+# This proxy satisfies that import. It reads from core.state_manager
+# so it picks up the live RedisClient set in main.py without needing
+# a circular import.
+
+class _RedisProxy:
+    """
+    Lazy proxy that forwards all calls to the RedisClient stored on
+    the global state singleton. Falls back to no-op (returns None/False/0)
+    if Redis has not been initialised yet, so imports never crash.
+    """
+
+    def _client(self):
+        try:
+            from core.state_manager import state
+            return state.get_redis()
+        except Exception:
+            return None
+
+    async def get(self, key: str):
+        c = self._client()
+        return await c.get(key) if c else None
+
+    async def set(self, key: str, value, ttl: int = 300) -> bool:
+        c = self._client()
+        return await c.set(key, value, ttl=ttl) if c else False
+
+    async def delete(self, *keys: str) -> int:
+        c = self._client()
+        return await c.delete(*keys) if c else 0
+
+    async def exists(self, key: str) -> bool:
+        c = self._client()
+        return await c.exists(key) if c else False
+
+    async def get_json(self, key: str):
+        c = self._client()
+        return await c.get_json(key) if c else None
+
+    async def set_json(self, key: str, value, ttl: int = 300) -> bool:
+        c = self._client()
+        return await c.set_json(key, value, ttl=ttl) if c else False
+
+    async def ping(self) -> bool:
+        c = self._client()
+        return await c.ping() if c else False
+
+
+redis_client = _RedisProxy()
