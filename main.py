@@ -225,6 +225,15 @@ async def _free_games_loop(session: ClientSession, cache) -> None:
 # ──────────────────────────────────────────────────────────────
 
 @bot.event
+async def on_command_error(ctx, error):
+    """Suppress CommandNotFound — happens when someone types !anything."""
+    if isinstance(error, commands.CommandNotFound):
+        return  # silently ignore
+    # Re-raise everything else
+    raise error
+
+
+@bot.event
 async def on_ready() -> None:
     logger.info(
         "Bot ready",
