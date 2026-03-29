@@ -122,6 +122,10 @@ async def startup_sync(bot) -> None:
                 callback_url = (
                     os.getenv("TWITCH_EVENTSUB_CALLBACK_URL")
                     or (
+                        os.getenv("PUBLIC_BASE_URL", "").rstrip("/") + "/eventsub"
+                        if os.getenv("PUBLIC_BASE_URL") else None
+                    )
+                    or (
                         f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}/eventsub"
                         if os.getenv("RAILWAY_PUBLIC_DOMAIN") else None
                     )
