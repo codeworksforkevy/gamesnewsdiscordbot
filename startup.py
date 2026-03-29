@@ -122,7 +122,7 @@ async def startup_sync(bot) -> None:
                 callback_url = (
                     os.getenv("TWITCH_EVENTSUB_CALLBACK_URL")
                     or (
-                        os.getenv("PUBLIC_BASE_URL", "").rstrip("/") + "/eventsub"
+                        os.getenv("PUBLIC_BASE_URL", "").rstrip("/") + "/twitch/eventsub"
                         if os.getenv("PUBLIC_BASE_URL") else None
                     )
                     or (
