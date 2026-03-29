@@ -208,7 +208,7 @@ def load_config() -> AppConfig:
     if not twitch_callback:
         public_base = get_env("PUBLIC_BASE_URL")
         if public_base:
-            twitch_callback = public_base.rstrip("/") + "/eventsub"
+            twitch_callback = public_base.rstrip("/") + "/twitch/eventsub"
             logger.info(f"TWITCH_EVENTSUB_CALLBACK_URL derived from PUBLIC_BASE_URL: {twitch_callback}")
     if not twitch_callback:
         railway_domain = get_env("RAILWAY_PUBLIC_DOMAIN")
