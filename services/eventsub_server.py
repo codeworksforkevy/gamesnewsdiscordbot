@@ -154,6 +154,7 @@ async def create_app(bot, app_state):
     app["app_state"] = app_state
 
     app.router.add_post("/eventsub", handle_eventsub)
+    app.router.add_post("/twitch/eventsub", handle_eventsub)  # alternate path
 
     logger.info("EventSub server ready")
     return app
