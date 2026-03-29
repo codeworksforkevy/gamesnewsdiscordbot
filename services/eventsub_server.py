@@ -111,18 +111,26 @@ async def handle_eventsub(request: web.Request):
                 logger.error("🔴 _bot_instance is None — event dropped!")
             else:
                 logger.info(f"🚀 Dispatching handle_stream_online for {login}")
-                request.app["bot"].loop.create_task(
-                    handle_stream_online(_bot_instance, event)
-                )
+                try:
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(handle_stream_online(_bot_instance, event))
+                    logger.info(f"✅ Task created for handle_stream_online({login})")
+                except Exception as e:
+                    logger.error(f"🔴 Failed to create task for {login}: {e}")
 
         elif sub_type == "stream.offline":
             if _bot_instance is None:
                 logger.error("🔴 _bot_instance is None — event dropped!")
             else:
                 logger.info(f"⚫ Dispatching handle_stream_offline for {login}")
-                request.app["bot"].loop.create_task(
-                    handle_stream_offline(_bot_instance, event)
-                )
+                try:
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(handle_stream_offline(_bot_instance, event))
+                    logger.info(f"✅ Task created for handle_stream_offline({login})")
+                except Exception as e:
+                    logger.error(f"🔴 Failed to create task for {login}: {e}")
 
         else:
             logger.warning(f"Unhandled EventSub type: {sub_type}")
