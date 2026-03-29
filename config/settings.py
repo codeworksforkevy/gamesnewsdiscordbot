@@ -206,10 +206,15 @@ def load_config() -> AppConfig:
     # Auto-derive callback URL from Railway's public domain if not set explicitly
     twitch_callback = get_env("TWITCH_EVENTSUB_CALLBACK_URL")
     if not twitch_callback:
+        public_base = get_env("PUBLIC_BASE_URL")
+        if public_base:
+            twitch_callback = public_base.rstrip("/") + "/eventsub"
+            logger.info(f"TWITCH_EVENTSUB_CALLBACK_URL derived from PUBLIC_BASE_URL: {twitch_callback}")
+    if not twitch_callback:
         railway_domain = get_env("RAILWAY_PUBLIC_DOMAIN")
         if railway_domain:
             twitch_callback = f"https://{railway_domain}/eventsub"
-            logger.info(f"TWITCH_EVENTSUB_CALLBACK_URL not set — derived from Railway domain: {twitch_callback}")
+            logger.info(f"TWITCH_EVENTSUB_CALLBACK_URL derived from RAILWAY_PUBLIC_DOMAIN: {twitch_callback}")
 
     _twitch_missing = [
         name for name, val in [
