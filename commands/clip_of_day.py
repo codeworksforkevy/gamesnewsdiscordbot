@@ -191,13 +191,17 @@ async def _post_daily_clips(bot, app_state):
 async def register(bot, app_state, session):
     """Register commands and start the background task safely."""
 
-    # DÜZELTME: Görevi doğrudan başlatmak yerine, botun döngüsüne (loop) güvenli bir şekilde ekliyoruz.
-    # Bu yöntem, 'RuntimeError: Client has not been properly initialised' hatasını engeller.
+    # DÜZELTME: bot.loop yerine doğrudan asyncio.create_task kullanıyoruz.
+    # Bu, 'loop attribute cannot be accessed' hatasını çözer.
     async def _safe_start():
-        await bot.wait_until_ready()
-        await _clip_of_day_loop(bot, app_state)
+        try:
+            await bot.wait_until_ready()
+            await _clip_of_day_loop(bot, app_state)
+        except Exception as e:
+            logger.error(f"🎬 Safe start failed: {e}")
 
-    bot.loop.create_task(_safe_start())
+    # Mevcut asenkron döngüde görevi başlatır
+    asyncio.create_task(_safe_start())
 
     @bot.tree.command(
         name="clip",
