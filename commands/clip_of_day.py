@@ -36,8 +36,8 @@ async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
             "clips",
             params={
                 "broadcaster_id": user["id"],
-                "first":          1,
-                "started_at":     started_at,
+                "first":           1,
+                "started_at":      started_at,
             },
         )
 
@@ -46,15 +46,15 @@ async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
 
         clip = data["data"][0]
         return {
-            "title":        clip.get("title", "Untitled"),
-            "url":          clip.get("url", ""),
-            "thumbnail":    clip.get("thumbnail_url", ""),
-            "view_count":   clip.get("view_count", 0),
-            "duration":     clip.get("duration", 0),
-            "creator":      clip.get("creator_name", "Unknown"),
-            "created_at":   clip.get("created_at", ""),
-            "broadcaster":  clip.get("broadcaster_name", user_login),
-            "game":         clip.get("game_id", ""),
+            "title":         clip.get("title", "Untitled"),
+            "url":           clip.get("url", ""),
+            "thumbnail":     clip.get("thumbnail_url", ""),
+            "view_count":    clip.get("view_count", 0),
+            "duration":      clip.get("duration", 0),
+            "creator":       clip.get("creator_name", "Unknown"),
+            "created_at":    clip.get("created_at", ""),
+            "broadcaster":   clip.get("broadcaster_name", user_login),
+            "game":          clip.get("game_id", ""),
             "profile_image": user.get("profile_image_url", ""),
         }
     except Exception as e:
@@ -89,8 +89,8 @@ def _build_clip_embed(clip: dict, user_login: str) -> discord.Embed:
     )
 
     embed.add_field(name="👀 Views",    value=f"{clip['view_count']:,}", inline=True)
-    embed.add_field(name="⏱️ Duration", value=duration_str,             inline=True)
-    embed.add_field(name="✂️ Clipped by", value=clip["creator"],         inline=True)
+    embed.add_field(name="⏱️ Duration", value=duration_str,               inline=True)
+    embed.add_field(name="✂️ Clipped by", value=clip["creator"],           inline=True)
 
     if created_ts:
         embed.add_field(name="📅 Clipped", value=created_ts, inline=True)
@@ -110,7 +110,14 @@ def _build_clip_embed(clip: dict, user_login: str) -> discord.Embed:
 
 async def _clip_of_day_loop(bot, app_state):
     """Posts the top clip of the week for each tracked streamer, daily at midnight UTC."""
-    await bot.wait_until_ready()
+    
+    # KRİTİK DÜZELTME: Botun tamamen hazır olduğundan emin olana kadar döngüyü başlatma.
+    try:
+        await bot.wait_until_ready()
+    except Exception as e:
+        logger.error(f"🎬 Loop failed to initialize: {e}")
+        return
+
     logger.info("🎬 Clip-of-day loop started")
 
     while True:
@@ -121,6 +128,7 @@ async def _clip_of_day_loop(bot, app_state):
         )
         sleep_secs = (tomorrow - now).total_seconds()
         logger.info(f"🎬 Next clip-of-day post in {sleep_secs/3600:.1f}h")
+        
         await asyncio.sleep(sleep_secs)
 
         try:
@@ -181,9 +189,15 @@ async def _post_daily_clips(bot, app_state):
 # ──────────────────────────────────────────────────────────────
 
 async def register(bot, app_state, session):
+    """Register commands and start the background task safely."""
 
-    # Start background daily task
-    asyncio.create_task(_clip_of_day_loop(bot, app_state), name="clip-of-day")
+    # DÜZELTME: Görevi doğrudan başlatmak yerine, botun döngüsüne (loop) güvenli bir şekilde ekliyoruz.
+    # Bu yöntem, 'RuntimeError: Client has not been properly initialised' hatasını engeller.
+    async def _safe_start():
+        await bot.wait_until_ready()
+        await _clip_of_day_loop(bot, app_state)
+
+    bot.loop.create_task(_safe_start())
 
     @bot.tree.command(
         name="clip",
