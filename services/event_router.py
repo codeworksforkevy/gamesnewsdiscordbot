@@ -27,14 +27,45 @@ LIVE_TTL = 60 * 60 * 6
 # EMBED BUILDER
 # ──────────────────────────────────────────────────────────────
 
-def _build_live_embed(user_login: str, user_name: str, stream: dict | None) -> discord.Embed:
-    title     = stream.get("title")   if stream else f"{user_name} is live!"
-    game      = stream.get("game_name") if stream else None
-    # Cache-bust the thumbnail so Discord always fetches the latest frame
+def _format_duration(seconds: int) -> str:
+    """Convert seconds to human-readable duration like 1h 23m 45s."""
+    h, rem = divmod(int(seconds), 3600)
+    m, s   = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _build_live_embed(
+    user_login: str,
+    user_name:  str,
+    stream:     dict | None,
+    user_info:  dict | None = None,
+) -> discord.Embed:
+    title        = (stream.get("title") if stream else None) or f"{user_name} is live!"
+    game         = (stream.get("game_name") if stream else None) or "Unknown"
+    viewer_count = stream.get("viewer_count", 0) if stream else 0
+    started_at   = stream.get("started_at",  "") if stream else ""
+    language     = (stream.get("language",   "") if stream else "").upper()
+
+    # Cache-busted thumbnail — Discord always fetches the latest frame
     thumbnail = (
         f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{user_login}"
         f"-1280x720.jpg?t={int(time.time())}"
     )
+
+    # Live duration
+    duration_str = ""
+    if started_at:
+        try:
+            from datetime import datetime, timezone
+            started  = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            elapsed  = (datetime.now(timezone.utc) - started).total_seconds()
+            duration_str = _format_duration(elapsed)
+        except Exception:
+            pass
 
     embed = discord.Embed(
         title=f"🔴  {title}",
@@ -42,22 +73,94 @@ def _build_live_embed(user_login: str, user_name: str, stream: dict | None) -> d
         color=0x9146FF,
     )
 
-    if game:
-        embed.add_field(name="Playing", value=game, inline=True)
+    # Author line with profile picture
+    if user_info and user_info.get("profile_image_url"):
+        embed.set_author(
+            name=f"{user_name} is live on Twitch!",
+            url=f"https://twitch.tv/{user_login}",
+            icon_url=user_info["profile_image_url"],
+        )
+    else:
+        embed.set_author(
+            name=f"{user_name} is live on Twitch!",
+            url=f"https://twitch.tv/{user_login}",
+        )
 
-    embed.add_field(name="Channel", value=f"[twitch.tv/{user_login}](https://twitch.tv/{user_login})", inline=True)
+    # Core fields
+    embed.add_field(name="🎮 Game",    value=game,                    inline=True)
+    embed.add_field(name="👥 Viewers", value=f"{viewer_count:,}",     inline=True)
+
+    if duration_str:
+        embed.add_field(name="⏱️ Live for", value=duration_str,       inline=True)
+
+    if language and language not in ("", "OTHER"):
+        embed.add_field(name="🌐 Language", value=language,           inline=True)
+
+    embed.add_field(
+        name="📺 Watch",
+        value=f"[twitch.tv/{user_login}](https://twitch.tv/{user_login})",
+        inline=True,
+    )
+
     embed.set_image(url=thumbnail)
-    embed.set_footer(text="Live on Twitch")
+    embed.set_footer(text="🟣 Live on Twitch • Notifications by Find a Curie")
+    embed.timestamp = discord.utils.utcnow()
 
     return embed
 
 
-def _build_offline_embed(user_login: str, user_name: str) -> discord.Embed:
-    embed = discord.Embed(
-        description=f"**{user_name}** has ended their stream.",
-        color=0x6e6e6e,
-    )
-    embed.set_footer(text=f"twitch.tv/{user_login}")
+def _build_offline_embed(
+    user_login:  str,
+    user_name:   str,
+    stream_info: dict | None = None,
+    vod_url:     str  | None = None,
+    duration:    str  | None = None,
+    user_info:   dict | None = None,
+) -> discord.Embed:
+    """
+    Rich offline embed showing stream summary, VOD link, and duration.
+    Goes well beyond Sapphire's basic offline card.
+    """
+    embed = discord.Embed(color=0x6e6e6e)
+
+    # Author with profile pic
+    if user_info and user_info.get("profile_image_url"):
+        embed.set_author(
+            name=f"{user_name} was live on Twitch",
+            url=f"https://twitch.tv/{user_login}",
+            icon_url=user_info["profile_image_url"],
+        )
+    else:
+        embed.set_author(
+            name=f"{user_name} was live on Twitch",
+            url=f"https://twitch.tv/{user_login}",
+        )
+
+    # Last stream title
+    if stream_info and stream_info.get("title"):
+        embed.description = f"*{stream_info['title']}*"
+
+    # Game played
+    if stream_info and stream_info.get("game_name"):
+        embed.add_field(name="🎮 Game",     value=stream_info["game_name"], inline=True)
+
+    # Stream duration
+    if duration:
+        embed.add_field(name="⏱️ Duration", value=duration,                inline=True)
+
+    # VOD link
+    if vod_url:
+        embed.add_field(name="🎬 VOD",      value=f"[Click to watch]({vod_url})", inline=True)
+    else:
+        embed.add_field(
+            name="🎬 VOD",
+            value=f"[Check channel]( https://www.twitch.tv/{user_login}/videos)",
+            inline=True,
+        )
+
+    embed.set_footer(text=f"⚫ Stream ended • twitch.tv/{user_login}")
+    embed.timestamp = discord.utils.utcnow()
+
     return embed
 
 
@@ -86,18 +189,19 @@ async def handle_stream_online(bot, event: dict):
     await redis_client.set(_status_key(user_login), "live", ttl=LIVE_TTL)
     logger.info(f"🟢 DEBUG event_router: Redis live flag set for {user_login}")
 
-    # ── Fetch metadata — use reliable API method directly ─────
-    stream = None
+    # ── Fetch stream metadata + user profile ──────────────────
+    stream    = None
+    user_info = None
     try:
         from core.state_manager import state
         api = state.get_bot().app_state.twitch_api
         if api:
-            results = await api.get_streams_by_logins([user_login])
-            stream  = results[0] if results else None
+            results   = await api.get_streams_by_logins([user_login])
+            stream    = results[0] if results else None
+            user_info = await api.get_user_by_login(user_login)
     except Exception as e:
-        logger.warning(f"🟡 DEBUG event_router: metadata fetch failed ({e}) — using fallback title")
+        logger.warning(f"🟡 DEBUG event_router: metadata fetch failed ({e}) — using fallback")
 
-    # Also try cache as secondary source
     if not stream:
         try:
             stream = await get_cached_stream(user_login)
@@ -105,11 +209,28 @@ async def handle_stream_online(bot, event: dict):
             pass
 
     logger.info(
-        f"🟢 DEBUG event_router: stream metadata = "
-        f"title={stream.get('title') if stream else None} | "
-        f"game={stream.get('game_name') if stream else None}"
+        f"🟢 DEBUG event_router: stream={stream.get('title') if stream else None} | "
+        f"game={stream.get('game_name') if stream else None} | "
+        f"viewers={stream.get('viewer_count') if stream else None}"
     )
-    embed = _build_live_embed(user_login, user_name, stream)
+
+    # Store stream info in Redis for offline embed
+    if stream:
+        try:
+            import json as _json
+            await redis_client.set(
+                f"stream:last:{user_login}",
+                _json.dumps({
+                    "title":      stream.get("title"),
+                    "game_name":  stream.get("game_name"),
+                    "started_at": stream.get("started_at"),
+                }),
+                ttl=LIVE_TTL,
+            )
+        except Exception:
+            pass
+
+    embed = _build_live_embed(user_login, user_name, stream, user_info)
 
     # ── Per-guild dispatch ─────────────────────────────────────
     logger.info(f"🟢 DEBUG event_router: iterating {len(bot.guilds)} guild(s)")
@@ -196,6 +317,43 @@ async def handle_stream_offline(bot, event: dict):
     # ── Clear Redis live flag ───────────────────────────────────
     await redis_client.delete(_status_key(user_login))
 
+    # ── Fetch last stream info + user profile + VOD ─────────────
+    stream_info = None
+    user_info   = None
+    vod_url     = None
+    duration    = None
+
+    try:
+        import json as _json
+        raw = await redis_client.get(f"stream:last:{user_login}")
+        if raw:
+            stream_info = _json.loads(raw)
+            # Calculate duration from stored started_at
+            if stream_info.get("started_at"):
+                from datetime import datetime, timezone
+                started = datetime.fromisoformat(
+                    stream_info["started_at"].replace("Z", "+00:00")
+                )
+                elapsed  = (datetime.now(timezone.utc) - started).total_seconds()
+                duration = _format_duration(elapsed)
+    except Exception:
+        pass
+
+    try:
+        from core.state_manager import state
+        api = state.get_bot().app_state.twitch_api
+        if api:
+            user_info = await api.get_user_by_login(user_login)
+            # Fetch latest VOD
+            vod_data = await api.request(
+                "videos",
+                params={"user_id": user_info["id"], "type": "archive", "first": 1}
+            ) if user_info else None
+            if vod_data and vod_data.get("data"):
+                vod_url = vod_data["data"][0].get("url")
+    except Exception as e:
+        logger.warning(f"Could not fetch VOD for {user_login}: {e}")
+
     # ── Send offline notice & remove live role per guild ───────
     for guild in bot.guilds:
 
@@ -209,7 +367,13 @@ async def handle_stream_offline(bot, event: dict):
         # Post offline embed
         if channel:
             try:
-                offline_embed = _build_offline_embed(user_login, user_name)
+                offline_embed = _build_offline_embed(
+                    user_login, user_name,
+                    stream_info=stream_info,
+                    vod_url=vod_url,
+                    duration=duration,
+                    user_info=user_info,
+                )
                 await channel.send(embed=offline_embed)
             except Exception as e:
                 logger.error(f"Offline notice failed for guild {guild.id}: {e}")
