@@ -111,13 +111,9 @@ def _build_clip_embed(clip: dict, user_login: str) -> discord.Embed:
 async def _clip_of_day_loop(bot, app_state):
     """Posts the top clip of the week for each tracked streamer, daily at midnight UTC."""
     
-    # KRİTİK DÜZELTME: Botun tamamen hazır olduğundan emin olana kadar döngüyü başlatma.
-    try:
-        await bot.wait_until_ready()
-    except Exception as e:
-        logger.error(f"🎬 Loop failed to initialize: {e}")
-        return
-
+    logger.info("🎬 Clip-of-day loop is waiting for signal...")
+    # Botun hazır olduğundan emin olmak için ek güvenlik önlemi
+    await bot.wait_until_ready()
     logger.info("🎬 Clip-of-day loop started")
 
     while True:
@@ -191,17 +187,14 @@ async def _post_daily_clips(bot, app_state):
 async def register(bot, app_state, session):
     """Register commands and start the background task safely."""
 
-    # DÜZELTME: bot.loop yerine doğrudan asyncio.create_task kullanıyoruz.
-    # Bu, 'loop attribute cannot be accessed' hatasını çözer.
-    async def _safe_start():
-        try:
-            await bot.wait_until_ready()
-            await _clip_of_day_loop(bot, app_state)
-        except Exception as e:
-            logger.error(f"🎬 Safe start failed: {e}")
-
-    # Mevcut asenkron döngüde görevi başlatır
-    asyncio.create_task(_safe_start())
+    # FIX: 'Client has not been properly initialised' hatasını çözmek için 
+    # döngüyü bot hazır olduğunda tetiklenen bir event içine alıyoruz.
+    @bot.event
+    async def on_ready():
+        if not hasattr(bot, "clip_of_day_task_started"):
+            bot.clip_of_day_task_started = True
+            asyncio.create_task(_clip_of_day_loop(bot, app_state), name="clip-of-day")
+            logger.info("🎬 Clip-of-day background task has been scheduled.")
 
     @bot.tree.command(
         name="clip",
@@ -224,8 +217,9 @@ async def register(bot, app_state, session):
         clip = await _fetch_top_clip(app_state.twitch_api, login, days=days)
 
         if not clip:
+            # Emoji 👩‍🔬 (Woman Scientist) olarak güncellendi.
             await interaction.followup.send(
-                f"😔 No clips found for **{login}** in the past {days} day(s).\n"
+                f"👩‍🔬 No clips found for **{login}** in the past {days} day(s).\n"
                 f"They may not have any clips yet, or the name is misspelled.",
                 ephemeral=True,
             )
