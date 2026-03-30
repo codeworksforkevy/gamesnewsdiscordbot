@@ -61,6 +61,14 @@ def _build_embed(lang: str) -> discord.Embed:
             inline=False,
         )
         embed.add_field(
+            name="🎬 Clips & Schema",
+            value=(
+                "Beste Twitch clips en aankomende streams.\n"
+                "`/clip <streamer>` • `/schedule` • `/schedule <streamer>`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="🛠️ Hulpmiddelen",
             value=(
                 "Handige tools voor dagelijks Discord-gebruik.\n"
@@ -110,6 +118,14 @@ def _build_embed(lang: str) -> discord.Embed:
         embed.add_field(
             name="📊 Stats",
             value="See how active tracked streamers are.\n`/live stats`",
+            inline=False,
+        )
+        embed.add_field(
+            name="🎬 Clips & Schedule",
+            value=(
+                "Top Twitch clips and upcoming stream schedules.\n"
+                "`/clip <streamer>` • `/schedule` • `/schedule <streamer>`"
+            ),
             inline=False,
         )
         embed.add_field(
