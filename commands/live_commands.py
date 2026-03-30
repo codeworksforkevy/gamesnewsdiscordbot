@@ -41,7 +41,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         url=stream_url,
         description=(
             f"**{name}** is live on Twitch!\n\n"
-            f"🎮 **{game}**\n"
+            f"👩‍💻 **{game}**\n"
             f"👀 **{viewers:,}** viewers"
             f"{started_str}"
         ),
@@ -373,7 +373,7 @@ class StreamMonitor:
             if change_type in ("title", "title+game"):
                 lines.append(f"📝 **Title:** ~~{prev.get('title', '?')}~~ → **{new_title}**")
             if change_type in ("game", "title+game"):
-                lines.append(f"🎮 **Game:** ~~{prev.get('game', '?')}~~ → **{new_game}**")
+                lines.append(f"👩‍💻 **Game:** ~~{prev.get('game', '?')}~~ → **{new_game}**")
 
             update_embed = discord.Embed(
                 title="📡 Stream Updated",
@@ -586,7 +586,7 @@ async def register(bot, app_state, session):
             })
 
             embed = discord.Embed(
-                title="🗑️ Streamer Removed",
+                title="Streamer Removed",
                 description=f"**{twitch_login}** has been removed from tracking.",
                 color=0xE74C3C,
             )
@@ -826,10 +826,10 @@ async def register(bot, app_state, session):
                     plural = 's' if count != 1 else ''
                     value = (
                         f"📺 **{count}** stream{plural}\n"
-                        f"⏱️ **{total_str}** total\n"
+                        f"☕ **{total_str}** total\n"
                         f"👥 Avg **{avg_viewers:,}** · Peak **{peak_viewers:,}**\n"
-                        f"🎮 **{fav_game}**\n"
-                        f"🕐 {last_str}"
+                        f"👩‍💻 **{fav_game}**\n"
+                        f"☕ {last_str}"
                     )
                 else:
                     value = "💤 Stats build up after first stream."
