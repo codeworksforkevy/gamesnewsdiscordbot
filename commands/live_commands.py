@@ -273,18 +273,20 @@ class StreamMonitor:
 
                 if stream:
                     new_title = stream.get("title", "")
+                    new_game  = stream.get("game_name", "")
                     if not prev.get("live"):
                         logger.info(
                             f"🚀 DEBUG StreamMonitor: {login} went LIVE — "
                             f"posting to channel {channel_id} in {guild.name}"
                         )
                         await self._post_live(guild, channel_id, login, stream, state_key)
-                    elif prev.get("title") != new_title:
+                    elif prev.get("title") != new_title or prev.get("game") != new_game:
+                        change_type = "title+game" if (prev.get("title") != new_title and prev.get("game") != new_game)                             else ("title" if prev.get("title") != new_title else "game")
                         logger.info(
-                            f"📡 DEBUG StreamMonitor: {login} title changed — updating embed"
+                            f"📡 DEBUG StreamMonitor: {login} {change_type} changed — updating"
                         )
-                        await self._update_title(
-                            guild, channel_id, stream, prev, state_key, new_title
+                        await self._update_stream(
+                            guild, channel_id, stream, prev, state_key, change_type
                         )
                     else:
                         logger.info(
@@ -321,28 +323,79 @@ class StreamMonitor:
                 "message_id": msg.id,
                 "channel_id": channel_id,
                 "title":      stream.get("title", ""),
+                "game":       stream.get("game_name", ""),
+                "started_at": stream.get("started_at", ""),
             }
 
             logger.info(f"{login} went live in {guild.name}")
             await assign_live_role(guild, login)
 
+            # Record stream start in history
+            try:
+                from datetime import datetime, timezone
+                await self.db.execute(
+                    """
+                    INSERT INTO stream_history (twitch_login, guild_id, title, game_name, started_at, peak_viewers)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    login, guild.id,
+                    stream.get("title"), stream.get("game_name"),
+                    datetime.now(timezone.utc),
+                    stream.get("viewer_count", 0),
+                )
+            except Exception:
+                pass  # non-critical
+
         except Exception as e:
             logger.error(f"post_live failed for {login} in {guild.name}: {e}")
 
-    async def _update_title(self, guild, channel_id, stream, prev, state_key, new_title):
+    async def _update_stream(self, guild, channel_id, stream, prev, state_key, change_type):
+        """Called when title or game changes mid-stream. Edits embed + posts change notice."""
+        login     = stream.get("user_login", "")
+        new_title = stream.get("title", "")
+        new_game  = stream.get("game_name", "")
         try:
             channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
             if not channel:
                 return
-            msg = await channel.fetch_message(prev["message_id"])
-            user_info = await self._get_user(stream.get("user_login", ""))
-            await msg.edit(embed=build_live_embed(stream, user_info))
+
+            # Edit the live embed silently
+            if prev.get("message_id"):
+                try:
+                    user_info = await self._get_user(login)
+                    msg = await channel.fetch_message(prev["message_id"])
+                    await msg.edit(embed=build_live_embed(stream, user_info))
+                except discord.NotFound:
+                    self._state.pop(state_key, None)
+
+            # Post a small update notice
+            lines = []
+            if change_type in ("title", "title+game"):
+                lines.append(f"📝 **Title:** ~~{prev.get('title', '?')}~~ → **{new_title}**")
+            if change_type in ("game", "title+game"):
+                lines.append(f"🎮 **Game:** ~~{prev.get('game', '?')}~~ → **{new_game}**")
+
+            update_embed = discord.Embed(
+                title="📡 Stream Updated",
+                description="\n".join(lines),
+                url=f"https://twitch.tv/{login}",
+                color=0xF5A623,
+            )
+            update_embed.set_footer(text=f"twitch.tv/{login}")
+            update_embed.timestamp = discord.utils.utcnow()
+            await channel.send(embed=update_embed)
+
+            # Update state
             self._state[state_key]["title"] = new_title
-            logger.info(f"{login} updated title in {guild.name}: {new_title!r}")
-        except discord.NotFound:
-            self._state.pop(state_key, None)
+            self._state[state_key]["game"]  = new_game
+            logger.info(f"📡 {login} stream updated ({change_type}) in {guild.name}")
+
         except Exception as e:
-            logger.error(f"update_title failed in {guild.name}: {e}")
+            logger.error(f"_update_stream failed for {login} in {guild.name}: {e}")
+
+    async def _update_title(self, guild, channel_id, stream, prev, state_key, new_title):
+        """Backward-compat wrapper."""
+        await self._update_stream(guild, channel_id, stream, prev, state_key, "title")
 
     async def _post_offline(self, guild, channel_id, login, prev, state_key):
         try:
@@ -355,6 +408,29 @@ class StreamMonitor:
                     pass
             self._state[state_key] = {"live": False}
             logger.info(f"{login} went offline in {guild.name}")
+
+            # Update stream history with end time and duration
+            try:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                started_at = prev.get("started_at")
+                duration = 0
+                if started_at:
+                    try:
+                        start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                        duration = int((now - start_dt).total_seconds())
+                    except Exception:
+                        pass
+                await self.db.execute(
+                    """
+                    UPDATE stream_history SET ended_at=$1, duration_secs=$2
+                    WHERE twitch_login=$3 AND guild_id=$4 AND ended_at IS NULL
+                    """,
+                    now, duration, login, guild.id,
+                )
+            except Exception:
+                pass  # non-critical
+
         except Exception as e:
             logger.error(f"post_offline failed for {login} in {guild.name}: {e}")
         await remove_live_role(guild, login)
@@ -461,17 +537,25 @@ async def register(bot, app_state, session):
 
             await interaction.followup.send(embed=embed)
 
-            if is_live_now and monitor:
-                stream    = live_streams[0]
-                state_key = (interaction.guild_id, twitch_login)
+            if is_live_now:
+                stream = live_streams[0]
                 channel_id = await _get_announce_channel_id(db, interaction.guild_id)
-                if channel_id:
+                if channel_id and monitor:
+                    # Post via StreamMonitor (updates internal state too)
+                    state_key = (interaction.guild_id, twitch_login)
                     await monitor._post_live(
                         interaction.guild,
                         channel_id,
                         twitch_login,
                         stream,
                         state_key,
+                    )
+                elif not channel_id:
+                    # No announce channel set — notify the admin in the command response
+                    await interaction.followup.send(
+                        f"⚠️ **{display_name}** is live right now but no announce channel is set.\n"
+                        f"Use `/live set-channel` to configure one, then I'll post notifications automatically.",
+                        ephemeral=True,
                     )
 
         except Exception:
@@ -653,7 +737,7 @@ async def register(bot, app_state, session):
             )
 
     # ── /live stats ────────────────────────────────────────────────────────
-    @group.command(name="stats", description="View stream activity for tracked streamers")
+    @group.command(name="stats", description="📊 Detailed stream stats for tracked streamers")
     async def live_stats(interaction: discord.Interaction):
 
         await interaction.response.defer(ephemeral=True)
@@ -664,13 +748,23 @@ async def register(bot, app_state, session):
                     """
                     SELECT
                         s.twitch_login,
-                        COUNT(h.id)         AS stream_count,
-                        AVG(h.peak_viewers) AS avg_viewers,
-                        MAX(h.started_at)   AS last_seen
+                        COUNT(h.id)                       AS stream_count,
+                        COALESCE(AVG(h.peak_viewers), 0) AS avg_viewers,
+                        COALESCE(MAX(h.peak_viewers), 0) AS peak_viewers,
+                        COALESCE(SUM(h.duration_secs), 0) AS total_secs,
+                        MAX(h.started_at)                 AS last_seen,
+                        (
+                            SELECT h2.game_name FROM stream_history h2
+                            WHERE h2.twitch_login = s.twitch_login
+                              AND h2.guild_id = s.guild_id
+                              AND h2.game_name IS NOT NULL
+                            GROUP BY h2.game_name
+                            ORDER BY COUNT(*) DESC LIMIT 1
+                        ) AS favourite_game
                     FROM streamers s
                     LEFT JOIN stream_history h
                         ON h.twitch_login = s.twitch_login
-                        AND h.guild_id    = s.guild_id
+                        AND h.guild_id = s.guild_id
                     WHERE s.guild_id = $1
                     GROUP BY s.twitch_login
                     ORDER BY stream_count DESC, s.twitch_login ASC
@@ -687,8 +781,17 @@ async def register(bot, app_state, session):
 
             if not rows:
                 return await interaction.followup.send(
-                    "📭 No streamers are being tracked yet. Use `/live add` to add one!",
+                    "📭 No streamers tracked yet. Use `/live add` to add one!",
                 )
+
+            # Who is live right now
+            monitor  = getattr(app_state, "stream_monitor", None)
+            live_now = set()
+            if monitor and hasattr(monitor, "_state"):
+                live_now = {
+                    login for (_, login), st in monitor._state.items()
+                    if st.get("live")
+                }
 
             embed = discord.Embed(
                 title=f"📊 Stream Stats — {interaction.guild.name}",
@@ -696,45 +799,55 @@ async def register(bot, app_state, session):
             )
 
             for row in rows:
-                login = row["twitch_login"]
-                url   = f"https://www.twitch.tv/{login}"
+                login     = row["twitch_login"]
+                url       = f"https://www.twitch.tv/{login}"
+                indicator = "🔴 " if login in live_now else ""
 
                 if has_history:
-                    count       = row["stream_count"] or 0
-                    avg_viewers = int(row["avg_viewers"] or 0)
-                    last_seen   = row["last_seen"]
+                    count        = int(row["stream_count"] or 0)
+                    avg_viewers  = int(row["avg_viewers"] or 0)
+                    peak_viewers = int(row["peak_viewers"] or 0)
+                    total_secs   = int(row["total_secs"] or 0)
+                    fav_game     = row["favourite_game"] or "—"
+                    last_seen    = row["last_seen"]
+
+                    total_h   = total_secs // 3600
+                    total_m   = (total_secs % 3600) // 60
+                    total_str = f"{total_h}h {total_m}m" if total_h else (f"{total_m}m" if total_m else "—")
 
                     last_str = "Never"
                     if last_seen:
                         try:
-                            if isinstance(last_seen, str):
-                                dt = datetime.fromisoformat(last_seen)
-                            else:
-                                dt = last_seen
-                            ts       = int(dt.timestamp())
-                            last_str = f"<t:{ts}:R>"
+                            dt = last_seen if not isinstance(last_seen, str)                                 else datetime.fromisoformat(last_seen)
+                            last_str = f"<t:{int(dt.timestamp())}:R>"
                         except Exception:
                             pass
 
+                    plural = 's' if count != 1 else ''
                     value = (
-                        f"📺 **{count}** stream{'s' if count != 1 else ''} tracked\n"
-                        f"👀 Avg **{avg_viewers:,}** viewers\n"
-                        f"🕐 Last seen {last_str}"
+                        f"📺 **{count}** stream{plural}\n"
+                        f"⏱️ **{total_str}** total\n"
+                        f"👥 Avg **{avg_viewers:,}** · Peak **{peak_viewers:,}**\n"
+                        f"🎮 **{fav_game}**\n"
+                        f"🕐 {last_str}"
                     )
                 else:
-                    value = "No history yet — stats build up over time."
+                    value = "💤 Stats build up after first stream."
 
                 embed.add_field(
-                    name=f"[{login}]({url})",
+                    name=f"{indicator}[{login}]({url})",
                     value=value,
                     inline=True,
                 )
 
+            live_count = len(live_now & {r["twitch_login"] for r in rows})
+            footer = f"🖥️ {len(rows)} tracked"
+            if live_count:
+                footer += f" · 🔴 {live_count} live now"
             if not has_history:
-                embed.set_footer(
-                    text="Full stats will appear once stream history is recorded."
-                )
-
+                footer += " · Stats build up over time"
+            embed.set_footer(text=footer)
+            embed.timestamp = discord.utils.utcnow()
             await interaction.followup.send(embed=embed)
 
         except Exception:
