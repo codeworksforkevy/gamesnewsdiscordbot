@@ -30,7 +30,7 @@ async def run_migrations(db) -> None:
     Tüm tabloları oluşturur, eksik kolonları ekler,
     ve guild konfigürasyonunu yazar.
     """
-    logger.info("Running database migrations...")
+    logger.info("🟢 DEBUG migrations: Starting run_migrations")
 
     try:
         await _create_tables(db)
@@ -109,6 +109,25 @@ async def _create_tables(db) -> None:
             viewer_count   INTEGER,
             last_updated   TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS stream_history (
+            id            BIGSERIAL   PRIMARY KEY,
+            twitch_login  TEXT        NOT NULL,
+            guild_id      BIGINT      NOT NULL,
+            title         TEXT,
+            game_name     TEXT,
+            peak_viewers  INTEGER     DEFAULT 0,
+            started_at    TIMESTAMPTZ,
+            ended_at      TIMESTAMPTZ,
+            duration_secs INTEGER     DEFAULT 0
+        )
+    """)
+
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_stream_history_login
+            ON stream_history (twitch_login, started_at DESC)
     """)
 
     logger.info("Tables verified/created")
@@ -207,12 +226,16 @@ async def _seed_guild_config(db) -> None:
     await db.execute("""
         INSERT INTO guild_configs (
             guild_id, announce_channel_id, games_channel_id,
-            notify_enabled, enable_ping
+            notify_enabled, enable_ping,
+            enable_epic, enable_gog, enable_steam
         )
-        VALUES ($1, $2, $3, TRUE, FALSE)
+        VALUES ($1, $2, $3, TRUE, FALSE, TRUE, TRUE, TRUE)
         ON CONFLICT (guild_id) DO UPDATE SET
             announce_channel_id = EXCLUDED.announce_channel_id,
             games_channel_id    = EXCLUDED.games_channel_id,
+            enable_epic         = TRUE,
+            enable_gog          = TRUE,
+            enable_steam        = TRUE,
             updated_at          = NOW()
     """, guild_id, stream_ch, games_ch)
 
