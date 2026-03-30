@@ -121,44 +121,55 @@ async def handle_free_games(
         return
     state.last_hash = current_hash
  
-    # ── Build embeds once, reuse across guilds ─────────────────────────────
-    embeds = [build_embed(game) for game in games]
-    count = len(games)
-    label = "game" if count == 1 else "games"
-    summary = f"🔥 {count} new free {label} available!"
- 
-    logger.info(f"Notifying {len(bot.guilds)} guild(s) about {count} new free {label}")
- 
-    # ── Per-guild dispatch ─────────────────────────────────────────────────
+    logger.info(f"Notifying {len(bot.guilds)} guild(s) about {len(games)} new game(s)")
+
+    # ── Per-guild dispatch with platform filtering ─────────────────────────
     for guild in bot.guilds:
         try:
             config = await get_guild_config(guild.id)
             if not config:
-                logger.debug(f"No config for guild {guild.id} ({guild.name}) — skipping")
+                logger.debug(f"No config for guild {guild.name} — skipping")
                 continue
- 
+
             channel_id = config.get("games_channel_id") or config.get("announce_channel_id")
             if not channel_id:
-                logger.debug(f"No announce channel set for guild {guild.id} — skipping")
+                logger.debug(f"No games channel for guild {guild.name} — skipping")
                 continue
- 
-            # get_channel is instant (cache); fetch_channel is a fallback API call
+
+            # ── Filter by per-guild platform toggles ──────────────────────
+            enable_epic  = config.get("enable_epic",  True)
+            enable_gog   = config.get("enable_gog",   True)
+            enable_steam = config.get("enable_steam", True)
+
+            filtered = [
+                g for g in games
+                if not (
+                    (g.get("platform", "").lower() == "epic"  and not enable_epic)  or
+                    (g.get("platform", "").lower() == "gog"   and not enable_gog)   or
+                    (g.get("platform", "").lower() == "steam" and not enable_steam)
+                )
+            ]
+
+            if not filtered:
+                logger.debug(f"All games filtered for guild {guild.name} — skipping")
+                continue
+
+            count   = len(filtered)
+            label   = "game" if count == 1 else "games"
+            summary = f"🔥 {count} new free {label} available!"
+            embeds  = [build_embed(g) for g in filtered]
+
             channel = guild.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             if not channel:
-                logger.warning(f"Channel {channel_id} not found in guild {guild.id}")
+                logger.warning(f"Channel {channel_id} not found in {guild.name}")
                 continue
- 
-            # Send embeds in chunks of 10 (hard Discord limit)
-            # FIX: use default argument (c=chunk) to capture chunk value,
-            #      not a reference that changes on the next loop iteration.
+
             for i in range(0, len(embeds), 10):
                 chunk = embeds[i:i + 10]
                 await retry_async(lambda c=chunk: channel.send(embeds=c))
- 
-            # Summary message after embeds
+
             await retry_async(lambda: channel.send(summary))
- 
-            logger.info(f"Notified guild {guild.name} ({guild.id}) — {count} {label}")
+            logger.info(f"✅ Notified {guild.name} — {count} {label}")
  
         except discord.Forbidden:
             logger.error(
