@@ -4,6 +4,7 @@ import asyncio
 
 from services.epic import fetch_epic_free
 from services.gog import fetch_gog_free
+from services.humble import fetch_humble_free
 from services.diff_engine import diff_games
 from core.event_bus import event_bus
 
@@ -130,10 +131,18 @@ async def update_free_games_cache(session, redis=None, bot=None):
             logger.warning(f"GOG fetch failed: {e}")
             gog = []
 
+        try:
+            async def fetch_humble():
+                return await fetch_humble_free(session)
+            humble = await retry_async(fetch_humble)
+        except Exception as e:
+            logger.warning(f"Humble fetch failed: {e}")
+            humble = []
+
         # -------------------------
         # MERGE
         # -------------------------
-        new_games = normalize_games(epic + gog)
+        new_games = normalize_games(epic + gog + humble)
 
         # -------------------------
         # LOAD CACHE
