@@ -12,7 +12,6 @@ logger = logging.getLogger("live-commands")
 # ==================================================
 
 def build_live_embed(stream: dict, user: dict) -> discord.Embed:
-    # Verileri güvenli bir şekilde alalım
     login      = stream.get("user_login") or user.get("login", "unknown")
     name       = stream.get("user_name")  or user.get("display_name", login)
     title      = stream.get("title") or "Untitled Stream"
@@ -24,7 +23,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
-    # Zaman damgası (Started: 5 minutes ago gibi görünür)
     ts_str = "now"
     if started_at:
         try:
@@ -33,7 +31,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
             ts_str = f"<t:{ts}:R>"
         except: pass
 
-    # VIEWERS TAMAMEN KALDIRILDI - BAŞLIK EKLENDİ
+    # VIEWERS KALDIRILDI, BAŞLIK (PROJECT) EKLENDİ
     description = (
         f"🏋️🏋️ **Time to chill with Kevy!** 🏋️🏋️\n\n"
         f"Grab your pencils, the art class is starting! ✏️\n\n"
@@ -43,7 +41,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     )
 
     embed = discord.Embed(
-        title=f"🎬 {title}", # Başlık buraya da ekleniyor
+        title=f"🎬 {title}",
         url=stream_url,
         description=description,
         color=0xFFB6C1, 
@@ -53,9 +51,8 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
 
     raw_thumb = stream.get("thumbnail_url", "")
     if raw_thumb:
-        # Thumbnail'in önbelleğe takılmaması için zaman damgası ekliyoruz
         thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
-        thumbnail += f"?v={int(time.time())}"
+        thumbnail += f"?v={int(time.time())}" # Cache-buster
         embed.set_image(url=thumbnail)
 
     embed.set_footer(text="🧪 Atmosphere: Very Cool")
@@ -83,10 +80,11 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
     embed = discord.Embed(
         title=f"{display_name} was live on Twitch",
         url=f"https://twitch.tv/{login}",
-        description=f"*{prev_state.get('title', 'No title')}*", # Italic başlık
+        description=f"*{prev_state.get('title', 'No title')}*", # Italic başlık korundu
         color=0x2f3136, 
     )
 
+    # 3 sütunlu zengin yapı korundu
     embed.add_field(name="👩‍💻 Game", value=game, inline=True)
     embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
     embed.add_field(name="🎬 VOD", value=f"[Click to watch](https://twitch.tv/{login}/videos)", inline=True)
@@ -97,7 +95,7 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
     return embed
 
 # ==================================================
-# MONITOR (BAŞLIK VE OYUN DEĞİŞİMİNİ TAKİP EDER)
+# MONITOR (AUTO-EDIT & THUMBNAIL DELAY)
 # ==================================================
 
 class StreamMonitor:
@@ -116,7 +114,6 @@ class StreamMonitor:
             self._task = asyncio.create_task(_run(), name="stream-monitor")
 
     async def _loop(self):
-        logger.info("🟢 StreamMonitor: polling begins")
         while True:
             try:
                 await self._poll()
@@ -151,24 +148,21 @@ class StreamMonitor:
             prev = self._state.get(state_key, {})
 
             if stream:
-                # Yeni yayın başladıysa
                 if not prev.get("live"):
+                    # 15 saniye bekleyip post atma
                     asyncio.create_task(self._delayed_post_live(guild_id, channel_id, login, stream, state_key))
                     self._state[state_key] = {"live": True, "pending": True}
                 
-                # Yayın zaten vardı ama BAŞLIK veya OYUN değiştiyse anında güncelle
+                # OYUN VEYA BAŞLIK DEĞİŞİRSE EDİTLE
                 elif prev.get("title") != stream["title"] or prev.get("game") != stream.get("game_name"):
-                    logger.info(f"🔄 Updating post for {login} (Title/Game change)")
                     await self._update_stream(guild_id, channel_id, stream, prev, state_key)
             
-            # Yayın bittiyse
             elif prev.get("live") and not prev.get("pending"):
                 await self._post_offline(guild_id, channel_id, login, prev, state_key)
 
     async def _delayed_post_live(self, guild_id, channel_id, login, stream, state_key):
-        await asyncio.sleep(15) # Thumbnail için bekleme süresi
+        await asyncio.sleep(15) 
         try:
-            # En güncel bilgiyi tekrar çek
             updated = await self.app_state.twitch_api.get_streams_by_logins([login])
             if updated: stream = updated[0]
         except: pass
@@ -192,12 +186,12 @@ class StreamMonitor:
             "message_id": msg.id, 
             "title": stream["title"], 
             "game": stream.get("game_name", "Creative / Art"),
-            "started_at": stream["started_at"]
+            "started_at": stream["started_at"],
+            "pending": False
         }
 
     async def _update_stream(self, guild_id, channel_id, stream, prev, state_key):
         guild = self.bot.get_guild(guild_id)
-        if not guild: return
         channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
         if not channel or not prev.get("message_id"): return
         
@@ -205,17 +199,14 @@ class StreamMonitor:
         try:
             msg = await channel.fetch_message(prev["message_id"])
             await msg.edit(embed=build_live_embed(stream, user_info))
-            # State'i yeni bilgilerle güncelle
             self._state[state_key].update({
                 "title": stream["title"], 
                 "game": stream.get("game_name", prev.get("game"))
             })
-        except Exception as e:
-            logger.error(f"Update failed: {e}")
+        except: pass
 
     async def _post_offline(self, guild_id, channel_id, login, prev, state_key):
         guild = self.bot.get_guild(guild_id)
-        if not guild: return
         channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
         if channel and prev.get("message_id"):
             try:
@@ -225,7 +216,7 @@ class StreamMonitor:
         self._state[state_key] = {"live": False}
 
 # ==================================================
-# REGISTER
+# REGISTER & COMMANDS
 # ==================================================
 
 async def register(bot, app_state, session):
@@ -234,9 +225,50 @@ async def register(bot, app_state, session):
     monitor.start()
     app_state.stream_monitor = monitor
 
-    group = app_commands.Group(name="live", description="Twitch tracking")
+    group = app_commands.Group(name="live", description="Manage Twitch tracking")
 
-    @group.command(name="add", description="Add streamer")
+    # --- FORCE POST ---
+    @group.command(name="force-post", description="⚠️ Send instant announcement")
+    async def force_post(interaction: discord.Interaction, twitch_login: str):
+        await interaction.response.defer(ephemeral=True)
+        login = twitch_login.lower().strip()
+        twitch = app_state.twitch_api
+        live_streams = await twitch.get_streams_by_logins([login])
+        
+        if not live_streams:
+            return await interaction.followup.send(f"👩‍🔬 **{login}** is not live.")
+
+        stream = live_streams[0]
+        user_info = await twitch.get_user_by_login(login)
+        
+        row = await db.fetchrow("SELECT target_channel_id FROM streamers WHERE twitch_login = $1 AND guild_id = $2", login, interaction.guild_id)
+        channel_id = row["target_channel_id"] if row else None
+        
+        if not channel_id:
+            g_cfg = await db.fetchrow("SELECT announce_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
+            channel_id = g_cfg["announce_channel_id"] if g_cfg else None
+
+        if not channel_id:
+            return await interaction.followup.send("❌ No channel set.")
+
+        try:
+            channel = interaction.guild.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            embed = build_live_embed(stream, user_info)
+            await channel.send(embed=embed)
+            
+            state_key = (interaction.guild_id, login)
+            monitor._state[state_key] = {
+                "live": True, 
+                "title": stream["title"], 
+                "game": stream.get("game_name", "Creative / Art"), 
+                "started_at": stream["started_at"]
+            }
+            await interaction.followup.send(f"✅ Forced announcement sent!")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    # --- ADD ---
+    @group.command(name="add", description="Add a streamer")
     async def add(interaction: discord.Interaction, twitch_login: str, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
         login = twitch_login.lower().strip()
@@ -251,5 +283,12 @@ async def register(bot, app_state, session):
         """, user["id"], login, interaction.guild_id, target_id)
         
         await interaction.followup.send(f"✅ **{user['display_name']}** added.")
+
+    # --- REMOVE ---
+    @group.command(name="remove", description="Remove a streamer")
+    async def remove(interaction: discord.Interaction, twitch_login: str):
+        await interaction.response.defer(ephemeral=True)
+        await db.execute("DELETE FROM streamers WHERE twitch_login = $1 AND guild_id = $2", twitch_login.lower(), interaction.guild_id)
+        await interaction.followup.send(f"✅ Removed **{twitch_login}**.")
 
     bot.tree.add_command(group)
