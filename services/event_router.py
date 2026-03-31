@@ -220,3 +220,28 @@ async def handle_stream_offline(bot, event: dict) -> None:
 
         except Exception as e:
             logger.debug(f"Offline edit failed for {user_login} in {guild.name}: {e}")
+
+# services/event_router.py dosyasının en altına ekle:
+
+async def get_stream_status(user_login: str) -> dict | None:
+    """
+    Status komutunun çalışması için gereken köprü fonksiyon.
+    """
+    user_login = user_login.lower()
+    status = await redis_client.get(_status_key(user_login))
+    
+    if status == "live":
+        from services.twitch_cache import get_cached_stream
+        return await get_cached_stream(user_login)
+        
+    try:
+        from core.state_manager import state
+        bot_instance = state.get_bot()
+        if bot_instance:
+            api = bot_instance.app_state.twitch_api
+            streams = await api.get_streams_by_logins([user_login])
+            if streams:
+                return streams[0]
+    except:
+        pass
+    return None
