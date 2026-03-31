@@ -4,8 +4,6 @@ import logging
 import asyncio
 from datetime import datetime, timezone
 
-from core.event_bus import event_bus
-
 logger = logging.getLogger("live-commands")
 
 # ==================================================
@@ -28,6 +26,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
             ts_str = f"<t:{ts}:R>"
         except: pass
 
+    # Tam istediğin sıralama ve Belçika Flamancası (Vlaams) adaptasyonu
     description = (
         f"🇬🇧 🏋️🏋️ **Time to chill with Kevy!** 🏋️🏋️\n"
         f"🇧🇪 🏋️🏋️ **Tijd om te chillen met Kevy!** 🏋️🏋️\n\n"
@@ -45,6 +44,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         color=0xFFB6C1, 
     )
 
+    # Author sadece streamer adı
     embed.set_author(name=name, url=stream_url, icon_url=user.get("profile_image_url"))
 
     raw_thumb = stream.get("thumbnail_url", "")
@@ -52,13 +52,24 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
         embed.set_image(url=thumbnail)
 
+    # Footer: İstediğin atmosfer bilgisi
     embed.set_footer(text="🧪 Atmosphere / Sfeer: Very Cool / Zeer Cool")
     embed.timestamp = discord.utils.utcnow()
     
     return embed
 
+def build_offline_embed(login: str, display_name: str) -> discord.Embed:
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    embed = discord.Embed(
+        title=f"{display_name} is now offline",
+        description=f"Stream ended <t:{now_ts}:R>",
+        color=0x808080,
+    )
+    embed.set_footer(text="⚫ Stream ended")
+    return embed
+
 # ==================================================
-# STREAM MONITOR & HELPERS
+# STREAM MONITOR (ÇOKLU KANAL DESTEKLİ)
 # ==================================================
 
 class StreamMonitor:
@@ -101,6 +112,7 @@ class StreamMonitor:
             guild_id = row["guild_id"]
             channel_id = row["target_channel_id"]
             
+            # Eğer yayıncıya özel kanal yoksa, varsayılan kanalı kullan
             if not channel_id:
                 g_cfg = await self.db.fetchrow("SELECT announce_channel_id FROM guild_settings WHERE guild_id = $1", guild_id)
                 channel_id = g_cfg["announce_channel_id"] if g_cfg else None
@@ -115,7 +127,7 @@ class StreamMonitor:
                 if not prev.get("live"):
                     await self._post_live(guild_id, channel_id, login, stream, state_key)
             elif prev.get("live"):
-                self._state[state_key] = {"live": False}
+                await self._post_offline(guild_id, channel_id, login, prev, state_key)
 
     async def _post_live(self, guild_id, channel_id, login, stream, state_key):
         guild = self.bot.get_guild(guild_id)
@@ -132,8 +144,19 @@ class StreamMonitor:
         msg = await channel.send(content=content, embed=embed)
         self._state[state_key] = {"live": True, "message_id": msg.id}
 
+    async def _post_offline(self, guild_id, channel_id, login, prev, state_key):
+        guild = self.bot.get_guild(guild_id)
+        if not guild: return
+        channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        if channel and prev.get("message_id"):
+            try:
+                msg = await channel.fetch_message(prev["message_id"])
+                await msg.edit(embed=build_offline_embed(login, login.capitalize()))
+            except: pass
+        self._state[state_key] = {"live": False}
+
 # ==================================================
-# REGISTER & ADMIN COMMANDS
+# REGISTER & COMMANDS
 # ==================================================
 
 async def register(bot, app_state, session):
@@ -142,7 +165,7 @@ async def register(bot, app_state, session):
     monitor.start()
     app_state.stream_monitor = monitor
 
-    group = app_commands.Group(name="live", description="Twitch yayın takibi")
+    group = app_commands.Group(name="live", description="Manage Twitch live stream tracking")
 
     # --- FORCE POST (Admin Only) ---
     @group.command(name="force-post", description="⚠️ (Admin) Bir yayıncı için anında duyuru postu atar")
@@ -152,49 +175,41 @@ async def register(bot, app_state, session):
         await interaction.response.defer(ephemeral=True)
         login = twitch_login.lower().strip()
         
-        # 1. Yayıncı verisini Twitch'ten çek
         twitch = app_state.twitch_api
         live_streams = await twitch.get_streams_by_logins([login])
         
         if not live_streams:
-            return await interaction.followup.send(f"👩‍🔬 **{login}** şu an canlı yayında görünmüyor. Offline birine duyuru atamam!")
+            return await interaction.followup.send(f"👩‍🔬 **{login}** şu an canlı yayında görünmüyor.")
 
         stream = live_streams[0]
         user_info = await twitch.get_user_by_login(login)
         
-        # 2. Kanalı belirle (Kevy ise sanat kanalını, değilse genel kanalı bul)
         row = await db.fetchrow("SELECT target_channel_id FROM streamers WHERE twitch_login = $1 AND guild_id = $2", login, interaction.guild_id)
+        channel_id = row["target_channel_id"] if row else None
         
-        channel_id = None
-        if row and row["target_channel_id"]:
-            channel_id = row["target_channel_id"]
-        else:
+        if not channel_id:
             g_cfg = await db.fetchrow("SELECT announce_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
             channel_id = g_cfg["announce_channel_id"] if g_cfg else None
 
         if not channel_id:
-            return await interaction.followup.send("❌ Duyuru atılacak bir kanal ayarlanmamış! `/live add` ile kanal belirleyin.")
+            return await interaction.followup.send("❌ Duyuru kanalı ayarlanmamış.")
 
-        # 3. Postu at
         try:
             channel = interaction.guild.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             embed = build_live_embed(stream, user_info)
-            
             live_role = discord.utils.get(interaction.guild.roles, name="Live")
             content = live_role.mention if live_role else None
             
             await channel.send(content=content, embed=embed)
             
-            # Monitorün state'ini güncelle ki bot kendi kendine tekrar atmasın
             state_key = (interaction.guild_id, login)
             monitor._state[state_key] = {"live": True}
             
-            await interaction.followup.send(f"✅ **{login}** için duyuru anında gönderildi!")
-            logger.info(f"🚀 Force post used for {login} by {interaction.user}")
+            await interaction.followup.send(f"✅ **{login}** için duyuru {channel.mention} kanalına anında gönderildi!")
         except Exception as e:
-            await interaction.followup.send(f"❌ Hata oluştu: {e}")
+            await interaction.followup.send(f"❌ Hata: {e}")
 
-    # --- ADD (Kanal Seçimli) ---
+    # --- ADD ---
     @group.command(name="add", description="Yayıncıyı listeye ve belirli kanala ekle")
     async def add(interaction: discord.Interaction, twitch_login: str, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
@@ -209,14 +224,14 @@ async def register(bot, app_state, session):
             ON CONFLICT (twitch_login, guild_id) DO UPDATE SET target_channel_id = EXCLUDED.target_channel_id
         """, user["id"], login, interaction.guild_id, target_id)
         
-        txt = f"**{channel.mention}** kanalına" if channel else "varsayılan kanala"
-        await interaction.followup.send(f"✅ **{user['display_name']}** {txt} eklendi.")
+        txt = f"**{channel.mention}**" if channel else "varsayılan"
+        await interaction.followup.send(f"✅ **{user['display_name']}** artık {txt} kanalına duyurulacak.")
 
     # --- REMOVE ---
-    @group.command(name="remove", description="Yayıncıyı listeden sil")
+    @group.command(name="remove", description="Yayıncı takibini bırak")
     async def remove(interaction: discord.Interaction, twitch_login: str):
         await interaction.response.defer(ephemeral=True)
         await db.execute("DELETE FROM streamers WHERE twitch_login = $1 AND guild_id = $2", twitch_login.lower(), interaction.guild_id)
-        await interaction.followup.send(f"✅ **{twitch_login}** takibi bırakıldı.")
+        await interaction.followup.send(f"✅ **{twitch_login}** kaldırıldı.")
 
     bot.tree.add_command(group)
