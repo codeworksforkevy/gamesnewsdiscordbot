@@ -16,43 +16,54 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     login      = stream.get("user_login") or user.get("login", "unknown")
     name       = stream.get("user_name")  or user.get("display_name", login)
     title      = stream.get("title", "Untitled stream")
-    game       = stream.get("game_name", "Unknown game")
+    game       = stream.get("game_name", "Art / Creative")
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
-    started_str = ""
+    # Zaman damgası
+    ts_str = "nu / now"
     if started_at:
         try:
             dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
             ts = int(dt.timestamp())
-            started_str = f"\n☕ Live since <t:{ts}:R>"
-        except Exception:
+            ts_str = f"<t:{ts}:R>"
+        except:
             pass
 
-    raw_thumb = stream.get("thumbnail_url", "")
-    thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
-
-    embed = discord.Embed(
-        title=title,
-        url=stream_url,
-        description=(
-            f"**{name}** is live on Twitch!\n\n"
-            f"👩‍💻 **{game}**"
-            f"{started_str}"
-        ),
-        color=0x9146FF,
+    # İstediğin özel açıklama metni ve emoji düzeni
+    description = (
+        f"🇬🇧 🏋️🏋️ **Time to chill with Kevy!** 🏋️🏋️\n"
+        f"🇧🇪 🏋️🏋️ **Tijd om te chillen met Kevy!** 🏋️🏋️\n\n"
+        f"🇬🇧 Grab your pencils, the art class is starting! ✏️\n"
+        f"🇧🇪 Pak je potloden, de tekenles begint! ✏️\n\n"
+        f"👩‍🔬 **Project / Project:** {title}\n"
+        f"👩‍💻 **Category / Categorie:** `{game}`\n"
+        f"☕ **Started / Gestart:** {ts_str}"
     )
 
+    embed = discord.Embed(
+        title=f"🎬 {title}",
+        url=stream_url,
+        description=description,
+        color=0xFFB6C1, # Samimi ve yumuşak bir pembe tonu
+    )
+
+    # Author sadece streamer adı
     embed.set_author(
-        name=f"{name} is live!",
+        name=name,
         url=stream_url,
         icon_url=user.get("profile_image_url"),
     )
 
-    if thumbnail:
+    raw_thumb = stream.get("thumbnail_url", "")
+    if raw_thumb:
+        thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
         embed.set_image(url=thumbnail)
 
-    embed.set_footer(text="🟣 Live on Twitch")
+    # Footer: İstediğin atmosfer bilgisi
+    embed.set_footer(text="🧪 Atmosphere / Sfeer: Very Cool / Zeer Cool")
+    embed.timestamp = discord.utils.utcnow()
+    
     return embed
 
 
@@ -124,7 +135,6 @@ class StreamMonitor:
 
     def start(self):
         if self._task is None or self._task.done():
-            # Buradaki asyncio.create_task'ı botun hazır olduğunu bekleyecek şekilde sarmalıyoruz
             async def _run():
                 await self.bot.wait_until_ready()
                 await self._loop()
@@ -152,6 +162,7 @@ class StreamMonitor:
 
         for row in rows:
             login = row["twitch_login"].lower()
+            # Kanal bilgisini çekiyoruz (guild_settings öncelikli)
             guild_rows = await self.db.fetch("""
                 SELECT s.guild_id, COALESCE(gs.announce_channel_id, gc.announce_channel_id) AS announce_channel_id
                 FROM streamers s
@@ -180,7 +191,12 @@ class StreamMonitor:
         if not channel: return
         user_info = await self.app_state.twitch_api.get_user_by_login(login)
         embed = build_live_embed(stream, user_info)
-        msg = await channel.send(embed=embed)
+        
+        # Etiketleme için rol kontrolü
+        live_role = discord.utils.get(guild.roles, name="Live")
+        content = live_role.mention if live_role else None
+        
+        msg = await channel.send(content=content, embed=embed)
         self._state[state_key] = {"live": True, "message_id": msg.id, "title": stream["title"], "game": stream["game_name"], "started_at": stream["started_at"]}
         await assign_live_role(guild, login)
 
@@ -243,6 +259,23 @@ async def register(bot, app_state, session):
         if not rows: return await interaction.followup.send("📭 No streamers tracked.")
         txt = "\n".join([f"• {r['twitch_login']}" for r in rows])
         await interaction.followup.send(f"👩‍🔬 **Tracked Streamers:**\n{txt}")
+
+    # --- SET CHANNEL (Özel Kanal Belirleme) ---
+    @group.command(name="set-channel", description="Yayın duyurularının yapılacağı kanalı belirle")
+    @app_commands.describe(channel="Duyuruların gönderileceği metin kanalı")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await db.execute("""
+                INSERT INTO guild_settings (guild_id, announce_channel_id)
+                VALUES ($1, $2)
+                ON CONFLICT (guild_id) DO UPDATE SET announce_channel_id = EXCLUDED.announce_channel_id
+            """, interaction.guild_id, channel.id)
+            await interaction.followup.send(f"✅ Yayın duyuruları artık {channel.mention} kanalına gönderilecek.")
+        except Exception as e:
+            logger.error(f"Set channel error: {e}")
+            await interaction.followup.send("❌ Kanal ayarlanırken bir hata oluştu.")
 
     # --- STATS ---
     @group.command(name="stats", description="📊 Stream stats")
