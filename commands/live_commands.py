@@ -57,7 +57,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
 def build_offline_embed(login: str, display_name: str, prev_state: dict) -> discord.Embed:
     now = datetime.now(timezone.utc)
     
-    # Süre hesaplama (Duration)
     duration_str = "Unknown"
     started_at = prev_state.get("started_at")
     if started_at:
@@ -76,7 +75,6 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
         color=0x2f3136, 
     )
 
-    # Görsellerdeki 3 sütunlu zengin yapı
     embed.add_field(name="🎮 Game", value=prev_state.get("game", "Unknown"), inline=True)
     embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
     embed.add_field(name="🎬 VOD", value=f"[Click to watch](https://twitch.tv/{login}/videos)", inline=True)
@@ -87,7 +85,7 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
     return embed
 
 # ==================================================
-# STREAM MONITOR (ZENGİN OFFLINE DESTEKLİ)
+# STREAM MONITOR
 # ==================================================
 
 class StreamMonitor:
@@ -161,8 +159,6 @@ class StreamMonitor:
         content = live_role.mention if live_role else None
         
         msg = await channel.send(content=content, embed=embed)
-        
-        # started_at bilgisini state'e kaydediyoruz ki süre hesaplayabilelim
         self._state[state_key] = {
             "live": True, 
             "message_id": msg.id, 
@@ -190,10 +186,8 @@ class StreamMonitor:
         if channel and prev.get("message_id"):
             try:
                 msg = await channel.fetch_message(prev["message_id"])
-                # Zengin Offline Embed'ini oluştur ve mesajı güncelle
                 await msg.edit(embed=build_offline_embed(login, login.capitalize(), prev))
-            except Exception as e:
-                logger.error(f"Error editing offline message: {e}")
+            except: pass
         self._state[state_key] = {"live": False}
 
 # ==================================================
@@ -208,8 +202,9 @@ async def register(bot, app_state, session):
 
     group = app_commands.Group(name="live", description="Twitch tracking")
 
+    # --- FORCE POST ---
     @group.command(name="force-post", description="⚠️ (Admin) Send instant announcement")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(twitch_login="Twitch username")
     async def force_post(interaction: discord.Interaction, twitch_login: str):
         await interaction.response.defer(ephemeral=True)
         login = twitch_login.lower().strip()
@@ -217,7 +212,7 @@ async def register(bot, app_state, session):
         live_streams = await twitch.get_streams_by_logins([login])
         
         if not live_streams:
-            return await interaction.followup.send(f"👩‍🔬 **{login}** is not live right now.")
+            return await interaction.followup.send(f"👩‍🔬 **{login}** is not live.")
 
         stream = live_streams[0]
         user_info = await twitch.get_user_by_login(login)
@@ -248,12 +243,13 @@ async def register(bot, app_state, session):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}")
 
-    @group.command(name="add", description="Add streamer with optional target channel")
+    # --- ADD ---
+    @group.command(name="add", description="Add streamer")
     async def add(interaction: discord.Interaction, twitch_login: str, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
         login = twitch_login.lower().strip()
         user = await app_state.twitch_api.get_user_by_login(login)
-        if not user: return await interaction.followup.send("❌ User not found.")
+        if not user: return await interaction.followup.send("❌ Not found.")
         
         target_id = channel.id if channel else None
         await db.execute("""
@@ -262,7 +258,16 @@ async def register(bot, app_state, session):
             ON CONFLICT (twitch_login, guild_id) DO UPDATE SET target_channel_id = EXCLUDED.target_channel_id
         """, user["id"], login, interaction.guild_id, target_id)
         
-        txt = f"to {channel.mention}" if channel else "to default channel"
-        await interaction.followup.send(f"✅ **{user['display_name']}** added {txt}.")
+        await interaction.followup.send(f"✅ **{user['display_name']}** added.")
+
+    # --- SYNC (Zorlayıcı Senkronizasyon) ---
+    @group.command(name="sync", description="⚠️ Komutları Discord ile senkronize et")
+    async def sync_cmds(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await bot.tree.sync()
+            await interaction.followup.send("✅ Slash komutları senkronize edildi! Şimdi listeyi kontrol et.")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Hata: {e}")
 
     bot.tree.add_command(group)
