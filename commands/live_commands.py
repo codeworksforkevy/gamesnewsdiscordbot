@@ -1,3 +1,5 @@
+# commands/live_commands.py
+
 import discord
 from discord import app_commands
 import logging
@@ -26,12 +28,15 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
             ts_str = f"<t:{ts}:R>"
         except: pass
 
+    # İzleyici sayısı (viewers) tamamen çıkarıldı
     description = (
-        f"🏋️🏋️ **Time to chill with Kevy!** 🏋️🏋️\n\n"
-        f"Grab your pencils, the art class is starting! ✏️\n\n"
-        f"👩‍🔬 **Project:** {title}\n"
-        f"👩‍💻 **Category:** `{game}`\n"
-        f"☕ **Started:** {ts_str}"
+        f"🇬🇧 🏋️🏋️ **Time to chill with Kevy!** 🏋️🏋️\n"
+        f"🇧🇪 🏋️🏋️ **Tijd om te chillen met Kevy!** 🏋️🏋️\n\n"
+        f"🇬🇧 Grab your pencils, the art class is starting! ✏️\n"
+        f"🇧🇪 Pak je potloden, de tekenles begint! ✏️\n\n"
+        f"👩‍🔬 **Project / Project:** {title}\n"
+        f"👩‍💻 **Category / Categorie:** `{game}`\n"
+        f"☕ **Started / Gestart:** {ts_str}"
     )
 
     embed = discord.Embed(
@@ -41,6 +46,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         color=0xFFB6C1, 
     )
 
+    # Author sadece streamer adı
     embed.set_author(name=name, url=stream_url, icon_url=user.get("profile_image_url"))
 
     raw_thumb = stream.get("thumbnail_url", "")
@@ -48,7 +54,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
         embed.set_image(url=thumbnail)
 
-    embed.set_footer(text="🧪 Atmosphere: Very Cool")
+    embed.set_footer(text="🧪 Atmosphere / Sfeer: Very Cool / Zeer Cool")
     embed.timestamp = discord.utils.utcnow()
     
     return embed
@@ -57,6 +63,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
 def build_offline_embed(login: str, display_name: str, prev_state: dict) -> discord.Embed:
     now = datetime.now(timezone.utc)
     
+    # Süre hesaplama (Duration)
     duration_str = "Unknown"
     started_at = prev_state.get("started_at")
     if started_at:
@@ -75,6 +82,7 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
         color=0x2f3136, 
     )
 
+    # Görsellerdeki zengin yapı (Viewers burada da yok)
     embed.add_field(name="🎮 Game", value=prev_state.get("game", "Unknown"), inline=True)
     embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
     embed.add_field(name="🎬 VOD", value=f"[Click to watch](https://twitch.tv/{login}/videos)", inline=True)
@@ -204,7 +212,6 @@ async def register(bot, app_state, session):
 
     # --- FORCE POST ---
     @group.command(name="force-post", description="⚠️ (Admin) Send instant announcement")
-    @app_commands.describe(twitch_login="Twitch username")
     async def force_post(interaction: discord.Interaction, twitch_login: str):
         await interaction.response.defer(ephemeral=True)
         login = twitch_login.lower().strip()
@@ -230,7 +237,11 @@ async def register(bot, app_state, session):
         try:
             channel = interaction.guild.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             embed = build_live_embed(stream, user_info)
-            await channel.send(embed=embed)
+            
+            live_role = discord.utils.get(interaction.guild.roles, name="Live")
+            content = live_role.mention if live_role else None
+            
+            await channel.send(content=content, embed=embed)
             
             state_key = (interaction.guild_id, login)
             monitor._state[state_key] = {
@@ -239,7 +250,7 @@ async def register(bot, app_state, session):
                 "game": stream["game_name"], 
                 "started_at": stream["started_at"]
             }
-            await interaction.followup.send(f"✅ Announcement sent to {channel.mention}!")
+            await interaction.followup.send(f"✅ Sent to {channel.mention}!")
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}")
 
@@ -259,15 +270,5 @@ async def register(bot, app_state, session):
         """, user["id"], login, interaction.guild_id, target_id)
         
         await interaction.followup.send(f"✅ **{user['display_name']}** added.")
-
-    # --- SYNC (Zorlayıcı Senkronizasyon) ---
-    @group.command(name="sync", description="⚠️ Komutları Discord ile senkronize et")
-    async def sync_cmds(interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            await bot.tree.sync()
-            await interaction.followup.send("✅ Slash komutları senkronize edildi! Şimdi listeyi kontrol et.")
-        except Exception as e:
-            await interaction.followup.send(f"❌ Hata: {e}")
 
     bot.tree.add_command(group)
