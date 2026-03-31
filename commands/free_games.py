@@ -4,7 +4,6 @@ import logging
 import discord
 from discord import app_commands
 from datetime import datetime
-
 from services.free_games_service import get_cached_free_games
 
 logger = logging.getLogger("free-games-command")
@@ -12,18 +11,7 @@ logger = logging.getLogger("free-games-command")
 # Senin sevdiğin Soft Pink rengi
 KEVY_PINK = 0xFFB6C1
 
-# Platformların yan renkleri (Embed içinde küçük vurgular için kullanılabilir)
-PLATFORM_EMOJIS = {
-    "epic": "🎮",
-    "steam": "☁️",
-    "gog": "💜",
-    "humble": "❤️",
-    "luna": "🌙",
-    "amazon": "📦"
-}
-
 class ClaimView(discord.ui.View):
-    """Oyun sayfasina giden şık bir buton."""
     def __init__(self, url: str, platform: str):
         super().__init__(timeout=None)
         self.add_item(
@@ -41,48 +29,44 @@ async def register(bot, app_state, session):
         await interaction.response.defer(thinking=True)
 
         try:
-            # Önbellekteki tüm bedava oyunları getir
             games = await get_cached_free_games(app_state.cache)
         except Exception as e:
             logger.error(f"Free games fetch failed: {e}")
-            return await interaction.followup.send("❌ An error occurred while fetching laboratory records.")
+            return await interaction.followup.send("❌ Error fetching data.")
 
         if not games:
-            return await interaction.followup.send("🧪 The lab is empty. No free experiments found right now.")
+            return await interaction.followup.send("No free games found right now.")
 
-        # En fazla 10 oyun göster (Discord limiti)
         for game in games[:10]:
-            title = game.get("title", "Unknown Experiment")
+            title = game.get("title", "Unknown Title")
             url = game.get("url", "")
-            platform = game.get("platform", "Unknown").lower()
+            platform = game.get("platform", "Unknown").capitalize()
             thumb = game.get("thumbnail")
             
-            # Embed Tasarımı (Kevy Stili)
+            # Sade ve şık Embed Tasarımı
             embed = discord.Embed(
-                title=f"{PLATFORM_EMOJIS.get(platform, '🎁')} {title}",
+                title=title,
                 url=url if url else None,
-                color=KEVY_PINK, # Ana renk her zaman pembe
-                description=f"👩‍🔬 **Curie's Lab Report:**\nThis experiment is now **FREE** to claim on **{platform.upper()}**!"
+                color=KEVY_PINK,
+                description=f"Free on **{platform}**" # Sadeleştirilmiş açıklama
             )
 
             if thumb:
                 embed.set_image(url=thumb)
 
-            # Bitiş tarihi varsa ekle
+            # Bitiş tarihi kontrolü
             end_date = game.get("end_date") or game.get("end_time")
             if end_date:
                 try:
                     dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-                    embed.set_footer(text="Limited time offer • Expires")
+                    embed.set_footer(text="Offer ends")
                     embed.timestamp = dt
                 except:
-                    embed.set_footer(text="🧪 Grab it before the experiment ends!")
+                    pass
             else:
-                embed.set_footer(text="🧪 Stay Zen • Available now")
+                embed.set_footer(text=f"{platform} • Free Game")
 
-            # Buton ekle
             view = ClaimView(url, platform) if url else None
-            
             await interaction.followup.send(embed=embed, view=view)
 
-    logger.info("Command /free_games registered with Soft Pink UX")
+    logger.info("Command /free_games registered with minimalist Soft Pink UX")
