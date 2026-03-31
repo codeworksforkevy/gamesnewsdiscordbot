@@ -12,11 +12,10 @@ logger = logging.getLogger("live-commands")
 # ==================================================
 
 def build_live_embed(stream: dict, user: dict) -> discord.Embed:
-    # Verileri doğrudan Twitch sözlüğünden çekiyoruz
-    login      = stream.get("user_login") or user.get("login", "unknown")
-    name       = stream.get("user_name")  or user.get("display_name", login)
+    login = stream.get("user_login") or user.get("login", "unknown")
+    name = stream.get("user_name") or user.get("display_name", login)
     stream_title = stream.get("title", "No Title")
-    game_name  = stream.get("game_name", "Creative / Art")
+    game_name = stream.get("game_name", "Creative / Art")
     
     if not game_name or str(game_name).lower() == "unknown":
         game_name = "Creative / Art"
@@ -42,14 +41,13 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     )
 
     embed = discord.Embed(
-        title=f"🎬 {stream_title}", # BAŞLIK BURAYA EKLENDİ
+        title=f"🎬 {stream_title}",
         url=stream_url,
         description=description,
         color=0xFFB6C1, 
     )
-
     embed.set_author(name=name, url=stream_url, icon_url=user.get("profile_image_url"))
-
+    
     raw_thumb = stream.get("thumbnail_url", "")
     if raw_thumb:
         thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
@@ -58,7 +56,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
 
     embed.set_footer(text="🧪 Atmosphere: Very Cool")
     embed.timestamp = discord.utils.utcnow()
-    
     return embed
 
 def build_offline_embed(login: str, display_name: str, prev_state: dict) -> discord.Embed:
@@ -80,17 +77,15 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
         description=f"*{prev_state.get('title', 'No title')}*", # ITALIC BAŞLIK
         color=0x2f3136, 
     )
-
     embed.add_field(name="👩‍💻 Game", value=prev_state.get("game", "Creative / Art"), inline=True)
     embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
     embed.add_field(name="🎬 VOD", value=f"[Click to watch](https://twitch.tv/{login}/videos)", inline=True)
-
     embed.set_footer(text=f"⚫ Stream ended • twitch.tv/{login}")
     embed.timestamp = now
     return embed
 
 # ==================================================
-# MONITOR & REGISTER
+# MONITOR & COMMANDS
 # ==================================================
 
 class StreamMonitor:
@@ -139,13 +134,12 @@ class StreamMonitor:
                     asyncio.create_task(self._delayed_post_live(guild_id, channel_id, login, stream, state_key))
                     self._state[state_key] = {"live": True, "pending": True}
                 elif prev.get("title") != stream["title"] or prev.get("game") != stream.get("game_name"):
-                    # OYUN VEYA BAŞLIK DEĞİŞİMİNDE ANINDA EDİT
                     await self._update_stream(guild_id, channel_id, stream, prev, state_key)
             elif prev.get("live") and not prev.get("pending"):
                 await self._post_offline(guild_id, channel_id, login, prev, state_key)
 
     async def _delayed_post_live(self, guild_id, channel_id, login, stream, state_key):
-        await asyncio.sleep(15) # Thumbnail gecikmesi
+        await asyncio.sleep(15) 
         try:
             upd = await self.app_state.twitch_api.get_streams_by_logins([login])
             if upd: stream = upd[0]
