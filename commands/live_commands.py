@@ -20,17 +20,14 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
-    # Zaman damgası
     ts_str = "nu / now"
     if started_at:
         try:
             dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
             ts = int(dt.timestamp())
             ts_str = f"<t:{ts}:R>"
-        except:
-            pass
+        except: pass
 
-    # İstediğin özel açıklama metni ve emoji düzeni
     description = (
         f"🇬🇧 🏋️🏋️ **Time to chill with Kevy!** 🏋️🏋️\n"
         f"🇧🇪 🏋️🏋️ **Tijd om te chillen met Kevy!** 🏋️🏋️\n\n"
@@ -45,84 +42,23 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         title=f"🎬 {title}",
         url=stream_url,
         description=description,
-        color=0xFFB6C1, # Samimi ve yumuşak bir pembe tonu
+        color=0xFFB6C1, 
     )
 
-    # Author sadece streamer adı
-    embed.set_author(
-        name=name,
-        url=stream_url,
-        icon_url=user.get("profile_image_url"),
-    )
+    embed.set_author(name=name, url=stream_url, icon_url=user.get("profile_image_url"))
 
     raw_thumb = stream.get("thumbnail_url", "")
     if raw_thumb:
         thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
         embed.set_image(url=thumbnail)
 
-    # Footer: İstediğin atmosfer bilgisi
     embed.set_footer(text="🧪 Atmosphere / Sfeer: Very Cool / Zeer Cool")
     embed.timestamp = discord.utils.utcnow()
     
     return embed
 
-
-def build_offline_embed(login: str, display_name: str) -> discord.Embed:
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    embed = discord.Embed(
-        title=f"{display_name} is now offline",
-        description=f"Stream ended <t:{now_ts}:R>",
-        color=0x808080,
-    )
-    embed.set_footer(text="⚫ Stream ended")
-    return embed
-
-
 # ==================================================
-# LIVE ROLE HELPERS
-# ==================================================
-
-async def ensure_live_role(guild: discord.Guild) -> discord.Role | None:
-    role = discord.utils.get(guild.roles, name="Live")
-    if role:
-        return role
-    try:
-        role = await guild.create_role(
-            name="Live",
-            color=discord.Color.from_rgb(145, 70, 255),
-            mentionable=True,
-            reason="Auto-created by Find a Curie bot",
-        )
-        return role
-    except Exception as e:
-        logger.error(f"Live role creation error: {e}")
-        return None
-
-
-async def assign_live_role(guild: discord.Guild, twitch_login: str) -> None:
-    role = await ensure_live_role(guild)
-    if not role: return
-    login_lower = twitch_login.lower()
-    for member in guild.members:
-        checks = [member.name.lower(), (member.nick or "").lower(), (member.global_name or "").lower()]
-        if login_lower in checks and role not in member.roles:
-            try: await member.add_roles(role)
-            except: pass
-
-
-async def remove_live_role(guild: discord.Guild, twitch_login: str) -> None:
-    role = discord.utils.get(guild.roles, name="Live")
-    if not role: return
-    login_lower = twitch_login.lower()
-    for member in guild.members:
-        checks = [member.name.lower(), (member.nick or "").lower(), (member.global_name or "").lower()]
-        if login_lower in checks and role in member.roles:
-            try: await member.remove_roles(role)
-            except: pass
-
-
-# ==================================================
-# STREAM MONITOR
+# STREAM MONITOR & HELPERS
 # ==================================================
 
 class StreamMonitor:
@@ -153,75 +89,51 @@ class StreamMonitor:
         twitch = self.app_state.twitch_api
         if not twitch: return
 
-        rows = await self.db.fetch("SELECT DISTINCT twitch_login FROM streamers")
+        rows = await self.db.fetch("SELECT twitch_login, guild_id, target_channel_id FROM streamers")
         if not rows: return
 
-        logins = [r["twitch_login"] for r in rows]
+        logins = list(set([r["twitch_login"] for r in rows]))
         live_streams = await twitch.get_streams_by_logins(logins)
         live_map = {s["user_login"].lower(): s for s in live_streams}
 
         for row in rows:
             login = row["twitch_login"].lower()
-            # Kanal bilgisini çekiyoruz (guild_settings öncelikli)
-            guild_rows = await self.db.fetch("""
-                SELECT s.guild_id, COALESCE(gs.announce_channel_id, gc.announce_channel_id) AS announce_channel_id
-                FROM streamers s
-                LEFT JOIN guild_settings gs ON gs.guild_id = s.guild_id
-                LEFT JOIN guild_configs gc ON gc.guild_id = s.guild_id
-                WHERE s.twitch_login = $1 AND COALESCE(gs.announce_channel_id, gc.announce_channel_id) IS NOT NULL
-            """, login)
+            guild_id = row["guild_id"]
+            channel_id = row["target_channel_id"]
+            
+            if not channel_id:
+                g_cfg = await self.db.fetchrow("SELECT announce_channel_id FROM guild_settings WHERE guild_id = $1", guild_id)
+                channel_id = g_cfg["announce_channel_id"] if g_cfg else None
+
+            if not channel_id: continue
 
             stream = live_map.get(login)
-            for g_row in guild_rows:
-                state_key = (g_row["guild_id"], login)
-                prev = self._state.get(state_key, {})
-                guild = self.bot.get_guild(g_row["guild_id"])
-                if not guild: continue
+            state_key = (guild_id, login)
+            prev = self._state.get(state_key, {})
 
-                if stream:
-                    if not prev.get("live"):
-                        await self._post_live(guild, g_row["announce_channel_id"], login, stream, state_key)
-                    elif prev.get("title") != stream["title"] or prev.get("game") != stream["game_name"]:
-                        await self._update_stream(guild, g_row["announce_channel_id"], stream, prev, state_key)
-                elif prev.get("live"):
-                    await self._post_offline(guild, g_row["announce_channel_id"], login, prev, state_key)
+            if stream:
+                if not prev.get("live"):
+                    await self._post_live(guild_id, channel_id, login, stream, state_key)
+            elif prev.get("live"):
+                self._state[state_key] = {"live": False}
 
-    async def _post_live(self, guild, channel_id, login, stream, state_key):
+    async def _post_live(self, guild_id, channel_id, login, stream, state_key):
+        guild = self.bot.get_guild(guild_id)
+        if not guild: return
         channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
         if not channel: return
+
         user_info = await self.app_state.twitch_api.get_user_by_login(login)
         embed = build_live_embed(stream, user_info)
         
-        # Etiketleme için rol kontrolü
         live_role = discord.utils.get(guild.roles, name="Live")
         content = live_role.mention if live_role else None
         
         msg = await channel.send(content=content, embed=embed)
-        self._state[state_key] = {"live": True, "message_id": msg.id, "title": stream["title"], "game": stream["game_name"], "started_at": stream["started_at"]}
-        await assign_live_role(guild, login)
-
-    async def _update_stream(self, guild, channel_id, stream, prev, state_key):
-        channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
-        if not channel: return
-        user_info = await self.app_state.twitch_api.get_user_by_login(stream["user_login"])
-        try:
-            msg = await channel.fetch_message(prev["message_id"])
-            await msg.edit(embed=build_live_embed(stream, user_info))
-        except: pass
-        self._state[state_key].update({"title": stream["title"], "game": stream["game_name"]})
-
-    async def _post_offline(self, guild, channel_id, login, prev, state_key):
-        channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
-        if channel and prev.get("message_id"):
-            try:
-                msg = await channel.fetch_message(prev["message_id"])
-                await msg.edit(embed=build_offline_embed(login, login.capitalize()))
-            except: pass
-        self._state[state_key] = {"live": False}
-        await remove_live_role(guild, login)
+        self._state[state_key] = {"live": True, "message_id": msg.id}
 
 # ==================================================
-# REGISTER & COMMANDS
+# REGISTER & ADMIN COMMANDS
 # ==================================================
 
 async def register(bot, app_state, session):
@@ -230,69 +142,81 @@ async def register(bot, app_state, session):
     monitor.start()
     app_state.stream_monitor = monitor
 
-    group = app_commands.Group(name="live", description="Manage Twitch live stream tracking")
+    group = app_commands.Group(name="live", description="Twitch yayın takibi")
 
-    # --- ADD ---
-    @group.command(name="add", description="Track a Twitch streamer")
-    async def add(interaction: discord.Interaction, twitch_login: str):
+    # --- FORCE POST (Admin Only) ---
+    @group.command(name="force-post", description="⚠️ (Admin) Bir yayıncı için anında duyuru postu atar")
+    @app_commands.describe(twitch_login="Duyurusu atılacak Twitch kullanıcı adı")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def force_post(interaction: discord.Interaction, twitch_login: str):
+        await interaction.response.defer(ephemeral=True)
+        login = twitch_login.lower().strip()
+        
+        # 1. Yayıncı verisini Twitch'ten çek
+        twitch = app_state.twitch_api
+        live_streams = await twitch.get_streams_by_logins([login])
+        
+        if not live_streams:
+            return await interaction.followup.send(f"👩‍🔬 **{login}** şu an canlı yayında görünmüyor. Offline birine duyuru atamam!")
+
+        stream = live_streams[0]
+        user_info = await twitch.get_user_by_login(login)
+        
+        # 2. Kanalı belirle (Kevy ise sanat kanalını, değilse genel kanalı bul)
+        row = await db.fetchrow("SELECT target_channel_id FROM streamers WHERE twitch_login = $1 AND guild_id = $2", login, interaction.guild_id)
+        
+        channel_id = None
+        if row and row["target_channel_id"]:
+            channel_id = row["target_channel_id"]
+        else:
+            g_cfg = await db.fetchrow("SELECT announce_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
+            channel_id = g_cfg["announce_channel_id"] if g_cfg else None
+
+        if not channel_id:
+            return await interaction.followup.send("❌ Duyuru atılacak bir kanal ayarlanmamış! `/live add` ile kanal belirleyin.")
+
+        # 3. Postu at
+        try:
+            channel = interaction.guild.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            embed = build_live_embed(stream, user_info)
+            
+            live_role = discord.utils.get(interaction.guild.roles, name="Live")
+            content = live_role.mention if live_role else None
+            
+            await channel.send(content=content, embed=embed)
+            
+            # Monitorün state'ini güncelle ki bot kendi kendine tekrar atmasın
+            state_key = (interaction.guild_id, login)
+            monitor._state[state_key] = {"live": True}
+            
+            await interaction.followup.send(f"✅ **{login}** için duyuru anında gönderildi!")
+            logger.info(f"🚀 Force post used for {login} by {interaction.user}")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Hata oluştu: {e}")
+
+    # --- ADD (Kanal Seçimli) ---
+    @group.command(name="add", description="Yayıncıyı listeye ve belirli kanala ekle")
+    async def add(interaction: discord.Interaction, twitch_login: str, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
         login = twitch_login.lower().strip()
         user = await app_state.twitch_api.get_user_by_login(login)
-        if not user: return await interaction.followup.send("❌ User not found.")
+        if not user: return await interaction.followup.send("❌ Kullanıcı bulunamadı.")
         
-        await db.execute("INSERT INTO streamers (twitch_user_id, twitch_login, guild_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-                        user["id"], login, interaction.guild_id)
-        await interaction.followup.send(f"✅ Now tracking **{user['display_name']}**")
+        target_id = channel.id if channel else None
+        await db.execute("""
+            INSERT INTO streamers (twitch_user_id, twitch_login, guild_id, target_channel_id) 
+            VALUES ($1, $2, $3, $4) 
+            ON CONFLICT (twitch_login, guild_id) DO UPDATE SET target_channel_id = EXCLUDED.target_channel_id
+        """, user["id"], login, interaction.guild_id, target_id)
+        
+        txt = f"**{channel.mention}** kanalına" if channel else "varsayılan kanala"
+        await interaction.followup.send(f"✅ **{user['display_name']}** {txt} eklendi.")
 
     # --- REMOVE ---
-    @group.command(name="remove", description="Stop tracking a streamer")
+    @group.command(name="remove", description="Yayıncıyı listeden sil")
     async def remove(interaction: discord.Interaction, twitch_login: str):
         await interaction.response.defer(ephemeral=True)
         await db.execute("DELETE FROM streamers WHERE twitch_login = $1 AND guild_id = $2", twitch_login.lower(), interaction.guild_id)
-        await interaction.followup.send(f"✅ Removed **{twitch_login}**")
-
-    # --- LIST ---
-    @group.command(name="list", description="List tracked streamers")
-    async def list_cmd(interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        rows = await db.fetch("SELECT twitch_login FROM streamers WHERE guild_id = $1", interaction.guild_id)
-        if not rows: return await interaction.followup.send("📭 No streamers tracked.")
-        txt = "\n".join([f"• {r['twitch_login']}" for r in rows])
-        await interaction.followup.send(f"👩‍🔬 **Tracked Streamers:**\n{txt}")
-
-    # --- SET CHANNEL (Özel Kanal Belirleme) ---
-    @group.command(name="set-channel", description="Yayın duyurularının yapılacağı kanalı belirle")
-    @app_commands.describe(channel="Duyuruların gönderileceği metin kanalı")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            await db.execute("""
-                INSERT INTO guild_settings (guild_id, announce_channel_id)
-                VALUES ($1, $2)
-                ON CONFLICT (guild_id) DO UPDATE SET announce_channel_id = EXCLUDED.announce_channel_id
-            """, interaction.guild_id, channel.id)
-            await interaction.followup.send(f"✅ Yayın duyuruları artık {channel.mention} kanalına gönderilecek.")
-        except Exception as e:
-            logger.error(f"Set channel error: {e}")
-            await interaction.followup.send("❌ Kanal ayarlanırken bir hata oluştu.")
-
-    # --- STATS ---
-    @group.command(name="stats", description="📊 Stream stats")
-    async def stats(interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        rows = await db.fetch("""
-            SELECT s.twitch_login, COUNT(h.id) as count, COALESCE(SUM(h.duration_secs), 0) as secs
-            FROM streamers s
-            LEFT JOIN stream_history h ON h.twitch_login = s.twitch_login AND h.guild_id = s.guild_id
-            WHERE s.guild_id = $1 GROUP BY s.twitch_login
-        """, interaction.guild_id)
-        
-        if not rows: return await interaction.followup.send("📭 No data yet.")
-        embed = discord.Embed(title="📊 Stream Stats", color=0x9146FF)
-        for r in rows:
-            h, m = divmod(r["secs"] // 60, 60)
-            embed.add_field(name=r["twitch_login"], value=f"📺 {r['count']} streams\n⏱️ {int(h)}h {int(m)}m total", inline=True)
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(f"✅ **{twitch_login}** takibi bırakıldı.")
 
     bot.tree.add_command(group)
