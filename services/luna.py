@@ -1,25 +1,24 @@
 import logging
+from typing import List, Dict, Any
+
 logger = logging.getLogger("luna")
 
-async def fetch_luna_free(session):
-    # Prime Gaming ana feed'i daha stabil
+async def fetch_luna_free(session) -> List[Dict[str, Any]]:
+    """Amazon Prime Gaming / Luna oyunlarını çeker."""
     PRIME_API = "https://gaming.amazon.com/api/v1/offers"
     headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
-        async with session.get(PRIME_API, headers=headers) as resp:
+        async with session.get(PRIME_API, headers=headers, timeout=15) as resp:
             if resp.status != 200: return []
             data = await resp.json()
             
             results = []
             for offer in data.get("offers", []):
-                # Sadece 'GAME' tipindeki bedavaları al
                 if offer.get("type") != "GAME": continue
                 
-                # Görseli derinlemesine tara
                 thumb = ""
-                assets = offer.get("assets", [])
-                for a in assets:
+                for a in offer.get("assets", []):
                     if a.get("purpose") in ["BOX_ART", "HERO_IMAGE"]:
                         thumb = a.get("location")
                         break
@@ -29,8 +28,13 @@ async def fetch_luna_free(session):
                     "url": "https://gaming.amazon.com/home",
                     "thumbnail": thumb,
                     "platform": "Luna",
-                    "description": "Free with Prime Gaming"
+                    "end_time": offer.get("endTime")
                 })
             return results
-    except Exception:
+    except Exception as e:
+        logger.error(f"Luna fetch failed: {e}")
         return []
+
+async def fetch_luna_membership(session) -> List[Dict[str, Any]]:
+    """Hata veren eksik fonksiyon: Poster loop ve komutlar burayı çağırır."""
+    return await fetch_luna_free(session)
