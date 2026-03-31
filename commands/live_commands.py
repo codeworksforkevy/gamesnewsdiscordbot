@@ -1,5 +1,3 @@
-# commands/live_commands.py
-
 import discord
 from discord import app_commands
 import logging
@@ -16,7 +14,11 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     login      = stream.get("user_login") or user.get("login", "unknown")
     name       = stream.get("user_name")  or user.get("display_name", login)
     title      = stream.get("title", "Untitled stream")
-    game       = stream.get("game_name", "Art / Creative")
+    # Game: Unknown gelirse "Creative / Art" olarak maskele
+    game       = stream.get("game_name")
+    if not game or game.lower() == "unknown":
+        game = "Creative / Art"
+        
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
@@ -28,15 +30,12 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
             ts_str = f"<t:{ts}:R>"
         except: pass
 
-    # İzleyici sayısı (viewers) tamamen çıkarıldı
     description = (
-        f"🇬🇧 🏋️🏋️ **Time to chill with Kevy!** 🏋️🏋️\n"
-        f"🇧🇪 🏋️🏋️ **Tijd om te chillen met Kevy!** 🏋️🏋️\n\n"
-        f"🇬🇧 Grab your pencils, the art class is starting! ✏️\n"
-        f"🇧🇪 Pak je potloden, de tekenles begint! ✏️\n\n"
-        f"👩‍🔬 **Project / Project:** {title}\n"
-        f"👩‍💻 **Category / Categorie:** `{game}`\n"
-        f"☕ **Started / Gestart:** {ts_str}"
+        f"🏋️🏋️ **Time to chill with Kevy!** 🏋️🏋️\n\n"
+        f"Grab your pencils, the art class is starting! ✏️\n\n"
+        f"👩‍🔬 **Project:** {title}\n"
+        f"👩‍💻 **Game:** `{game}`\n"
+        f"☕ **Started:** {ts_str}"
     )
 
     embed = discord.Embed(
@@ -46,7 +45,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         color=0xFFB6C1, 
     )
 
-    # Author sadece streamer adı
     embed.set_author(name=name, url=stream_url, icon_url=user.get("profile_image_url"))
 
     raw_thumb = stream.get("thumbnail_url", "")
@@ -54,7 +52,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
         embed.set_image(url=thumbnail)
 
-    embed.set_footer(text="🧪 Atmosphere / Sfeer: Very Cool / Zeer Cool")
+    embed.set_footer(text="🧪 Atmosphere: Very Cool")
     embed.timestamp = discord.utils.utcnow()
     
     return embed
@@ -63,7 +61,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
 def build_offline_embed(login: str, display_name: str, prev_state: dict) -> discord.Embed:
     now = datetime.now(timezone.utc)
     
-    # Süre hesaplama (Duration)
+    # Süre hesaplama
     duration_str = "Unknown"
     started_at = prev_state.get("started_at")
     if started_at:
@@ -75,15 +73,19 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
             duration_str = f"{h}h {m}m {s}s"
         except: pass
 
+    game = prev_state.get("game")
+    if not game or game.lower() == "unknown":
+        game = "Creative / Art"
+
     embed = discord.Embed(
         title=f"{display_name} was live on Twitch",
         url=f"https://twitch.tv/{login}",
-        description=f"*{prev_state.get('title', 'No title')}*",
+        description=f"*{prev_state.get('title', 'No title')}*", # Italic başlık
         color=0x2f3136, 
     )
 
-    # Görsellerdeki zengin yapı (Viewers burada da yok)
-    embed.add_field(name="🎮 Game", value=prev_state.get("game", "Unknown"), inline=True)
+    # Görseldeki 3 sütunlu yapı ve yeni emoji
+    embed.add_field(name="👩‍💻 Game", value=game, inline=True)
     embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
     embed.add_field(name="🎬 VOD", value=f"[Click to watch](https://twitch.tv/{login}/videos)", inline=True)
 
@@ -93,7 +95,7 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
     return embed
 
 # ==================================================
-# STREAM MONITOR
+# STREAM MONITOR (STATE YÖNETİMLİ)
 # ==================================================
 
 class StreamMonitor:
@@ -149,7 +151,7 @@ class StreamMonitor:
             if stream:
                 if not prev.get("live"):
                     await self._post_live(guild_id, channel_id, login, stream, state_key)
-                elif prev.get("title") != stream["title"] or prev.get("game") != stream["game_name"]:
+                elif prev.get("title") != stream["title"] or (stream["game_name"] != "Unknown" and prev.get("game") != stream["game_name"]):
                     await self._update_stream(guild_id, channel_id, stream, prev, state_key)
             elif prev.get("live"):
                 await self._post_offline(guild_id, channel_id, login, prev, state_key)
@@ -171,7 +173,7 @@ class StreamMonitor:
             "live": True, 
             "message_id": msg.id, 
             "title": stream["title"], 
-            "game": stream["game_name"],
+            "game": stream.get("game_name", "Creative / Art"),
             "started_at": stream["started_at"]
         }
 
@@ -181,11 +183,17 @@ class StreamMonitor:
         channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
         if not channel: return
         user_info = await self.app_state.twitch_api.get_user_by_login(stream["user_login"])
+        
+        # Eğer yeni game_name "Unknown" gelirse eski geçerli ismi koru
+        game = stream.get("game_name")
+        if not game or game.lower() == "unknown":
+            game = prev.get("game", "Creative / Art")
+
         try:
             msg = await channel.fetch_message(prev["message_id"])
             await msg.edit(embed=build_live_embed(stream, user_info))
         except: pass
-        self._state[state_key].update({"title": stream["title"], "game": stream["game_name"]})
+        self._state[state_key].update({"title": stream["title"], "game": game})
 
     async def _post_offline(self, guild_id, channel_id, login, prev, state_key):
         guild = self.bot.get_guild(guild_id)
@@ -199,7 +207,7 @@ class StreamMonitor:
         self._state[state_key] = {"live": False}
 
 # ==================================================
-# REGISTER & COMMANDS
+# REGISTER & ADMIN COMMANDS
 # ==================================================
 
 async def register(bot, app_state, session):
@@ -210,8 +218,8 @@ async def register(bot, app_state, session):
 
     group = app_commands.Group(name="live", description="Twitch tracking")
 
-    # --- FORCE POST ---
     @group.command(name="force-post", description="⚠️ (Admin) Send instant announcement")
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def force_post(interaction: discord.Interaction, twitch_login: str):
         await interaction.response.defer(ephemeral=True)
         login = twitch_login.lower().strip()
@@ -247,14 +255,13 @@ async def register(bot, app_state, session):
             monitor._state[state_key] = {
                 "live": True, 
                 "title": stream["title"], 
-                "game": stream["game_name"], 
+                "game": stream.get("game_name", "Creative / Art"), 
                 "started_at": stream["started_at"]
             }
-            await interaction.followup.send(f"✅ Sent to {channel.mention}!")
+            await interaction.followup.send(f"✅ Success!")
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}")
 
-    # --- ADD ---
     @group.command(name="add", description="Add streamer")
     async def add(interaction: discord.Interaction, twitch_login: str, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
