@@ -242,7 +242,7 @@ async def register(bot, app_state, session):
         rows = await db.fetch("SELECT twitch_login FROM streamers WHERE guild_id = $1", interaction.guild_id)
         if not rows: return await interaction.followup.send("📭 No streamers tracked.")
         txt = "\n".join([f"• {r['twitch_login']}" for r in rows])
-        await interaction.followup.send(f"📡 **Tracked Streamers:**\n{txt}")
+        await interaction.followup.send(f"👩‍🔬 **Tracked Streamers:**\n{txt}")
 
     # --- STATS ---
     @group.command(name="stats", description="📊 Stream stats")
