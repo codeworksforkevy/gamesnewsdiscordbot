@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 import logging
 import asyncio
+import time
 from datetime import datetime, timezone
 
 logger = logging.getLogger("live-commands")
@@ -14,8 +15,8 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     login      = stream.get("user_login") or user.get("login", "unknown")
     name       = stream.get("user_name")  or user.get("display_name", login)
     title      = stream.get("title", "Untitled stream")
-    # Game: Unknown gelirse "Creative / Art" olarak maskele
-    game       = stream.get("game_name")
+    
+    game = stream.get("game_name")
     if not game or game.lower() == "unknown":
         game = "Creative / Art"
         
@@ -49,7 +50,9 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
 
     raw_thumb = stream.get("thumbnail_url", "")
     if raw_thumb:
+        # Görselin güncel gelmesi için URL sonuna timestamp ekleyerek cache-bust yapıyoruz
         thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
+        thumbnail += f"?t={int(time.time())}" 
         embed.set_image(url=thumbnail)
 
     embed.set_footer(text="🧪 Atmosphere: Very Cool")
@@ -61,7 +64,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
 def build_offline_embed(login: str, display_name: str, prev_state: dict) -> discord.Embed:
     now = datetime.now(timezone.utc)
     
-    # Süre hesaplama
     duration_str = "Unknown"
     started_at = prev_state.get("started_at")
     if started_at:
@@ -73,18 +75,15 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
             duration_str = f"{h}h {m}m {s}s"
         except: pass
 
-    game = prev_state.get("game")
-    if not game or game.lower() == "unknown":
-        game = "Creative / Art"
+    game = prev_state.get("game", "Creative / Art")
 
     embed = discord.Embed(
         title=f"{display_name} was live on Twitch",
         url=f"https://twitch.tv/{login}",
-        description=f"*{prev_state.get('title', 'No title')}*", # Italic başlık
+        description=f"*{prev_state.get('title', 'No title')}*",
         color=0x2f3136, 
     )
 
-    # Görseldeki 3 sütunlu yapı ve yeni emoji
     embed.add_field(name="👩‍💻 Game", value=game, inline=True)
     embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
     embed.add_field(name="🎬 VOD", value=f"[Click to watch](https://twitch.tv/{login}/videos)", inline=True)
@@ -95,7 +94,7 @@ def build_offline_embed(login: str, display_name: str, prev_state: dict) -> disc
     return embed
 
 # ==================================================
-# STREAM MONITOR (STATE YÖNETİMLİ)
+# STREAM MONITOR (DELAY EKLENDİ)
 # ==================================================
 
 class StreamMonitor:
@@ -150,11 +149,28 @@ class StreamMonitor:
 
             if stream:
                 if not prev.get("live"):
-                    await self._post_live(guild_id, channel_id, login, stream, state_key)
+                    # YENİ: Yayını algıladık, ama thumbnail'in güncellenmesi için 
+                    # arka planda kısa bir bekletme başlatıyoruz.
+                    asyncio.create_task(self._delayed_post_live(guild_id, channel_id, login, stream, state_key))
+                    # Çift postu engellemek için state'i hemen "geçici" olarak güncelliyoruz
+                    self._state[state_key] = {"live": True, "pending": True}
                 elif prev.get("title") != stream["title"] or (stream["game_name"] != "Unknown" and prev.get("game") != stream["game_name"]):
                     await self._update_stream(guild_id, channel_id, stream, prev, state_key)
             elif prev.get("live"):
                 await self._post_offline(guild_id, channel_id, login, prev, state_key)
+
+    async def _delayed_post_live(self, guild_id, channel_id, login, stream, state_key):
+        """Thumbnail'in hazır olması için 15 saniye bekleyip öyle post atar."""
+        await asyncio.sleep(15) 
+        
+        # Güncel yayın bilgisini tekrar çekelim (Thumbnail değişmiş olabilir)
+        try:
+            updated_streams = await self.app_state.twitch_api.get_streams_by_logins([login])
+            if updated_streams:
+                stream = updated_streams[0]
+        except: pass
+
+        await self._post_live(guild_id, channel_id, login, stream, state_key)
 
     async def _post_live(self, guild_id, channel_id, login, stream, state_key):
         guild = self.bot.get_guild(guild_id)
@@ -184,16 +200,11 @@ class StreamMonitor:
         if not channel: return
         user_info = await self.app_state.twitch_api.get_user_by_login(stream["user_login"])
         
-        # Eğer yeni game_name "Unknown" gelirse eski geçerli ismi koru
-        game = stream.get("game_name")
-        if not game or game.lower() == "unknown":
-            game = prev.get("game", "Creative / Art")
-
         try:
             msg = await channel.fetch_message(prev["message_id"])
             await msg.edit(embed=build_live_embed(stream, user_info))
         except: pass
-        self._state[state_key].update({"title": stream["title"], "game": game})
+        self._state[state_key].update({"title": stream["title"], "game": stream.get("game_name", prev.get("game"))})
 
     async def _post_offline(self, guild_id, channel_id, login, prev, state_key):
         guild = self.bot.get_guild(guild_id)
@@ -224,8 +235,9 @@ async def register(bot, app_state, session):
         await interaction.response.defer(ephemeral=True)
         login = twitch_login.lower().strip()
         twitch = app_state.twitch_api
-        live_streams = await twitch.get_streams_by_logins([login])
         
+        # Force-post'ta beklemeye gerek yok, kullanıcı zaten elle tetikledi
+        live_streams = await twitch.get_streams_by_logins([login])
         if not live_streams:
             return await interaction.followup.send(f"👩‍🔬 **{login}** is not live.")
 
@@ -245,7 +257,6 @@ async def register(bot, app_state, session):
         try:
             channel = interaction.guild.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             embed = build_live_embed(stream, user_info)
-            
             live_role = discord.utils.get(interaction.guild.roles, name="Live")
             content = live_role.mention if live_role else None
             
@@ -258,7 +269,7 @@ async def register(bot, app_state, session):
                 "game": stream.get("game_name", "Creative / Art"), 
                 "started_at": stream["started_at"]
             }
-            await interaction.followup.send(f"✅ Success!")
+            await interaction.followup.send(f"✅ Sent!")
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}")
 
