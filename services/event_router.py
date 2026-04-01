@@ -98,8 +98,17 @@ async def get_stream_status(user_login: str) -> dict | None:
     return None
 
 async def handle_stream_online(bot, event: dict) -> None:
-    user_login = event["broadcaster_user_login"].lower()
-    user_name  = event["broadcaster_user_name"]
+    # 🔍 DEBUG LOGU: Twitch'ten tam olarak ne geliyor?
+    user_login = event.get("broadcaster_user_login", "N/A")
+    user_name = event.get("broadcaster_user_name", "N/A")
+    
+    logger.info(f"🔍 DEBUG: Attempting to post live for {user_name} ({user_login})")
+    
+    if user_login == "N/A":
+        logger.error("🔴 Twitch payload is missing broadcaster_user_login! Check EventSub version.")
+        return
+    
+    # Gerisi normal handle kodun...
     
     await redis_client.set(_status_key(user_login), "live", expire=21600)
     
