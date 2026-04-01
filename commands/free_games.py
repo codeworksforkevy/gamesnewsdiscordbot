@@ -1,4 +1,3 @@
-# commands/free_games.py
 import logging
 import discord
 from discord import app_commands
@@ -20,7 +19,7 @@ async def register(bot, app_state, session):
         try:
             games = await get_cached_free_games(app_state.cache)
         except Exception:
-            return await interaction.followup.send("Error fetching data.")
+            return await interaction.followup.send("Error fetching experiments.")
 
         if not games:
             return await interaction.followup.send("No free games found right now.")
