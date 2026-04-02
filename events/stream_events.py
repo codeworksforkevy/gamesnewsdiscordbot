@@ -80,39 +80,45 @@ META_TTL  = 300             # 5 minutes for stream metadata
 # ──────────────────────────────────────────────────────────────
 
 def _live_embed(login: str, stream: dict) -> discord.Embed:
-    title        = stream.get("title") or f"{login} is live!"
-    game         = stream.get("game_name") or "Unknown"
-    viewer_count = stream.get("viewer_count")
+    title     = stream.get("title") or ""
+    game      = stream.get("game_name") or "Just Chatting"
+    started_at = stream.get("started_at", "")
 
-    # Cache-bust so Discord always fetches the latest thumbnail frame
+    if not game or game.lower() == "unknown":
+        game = "Just Chatting"
+
     thumbnail = (
         f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{login}"
         f"-1280x720.jpg?t={int(time.time())}"
     )
 
+    ts_str = "now"
+    if started_at:
+        try:
+            from datetime import datetime, timezone as _tz
+            dt     = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            ts_str = f"<t:{int(dt.timestamp())}:R>"
+        except Exception:
+            pass
+
+    # Title direkt, etiket yok — viewer yok
+    desc_lines = []
+    if title:
+        desc_lines.append(title)
+    desc_lines += [
+        f"\U0001f469\u200d\U0001f4bb **Game:** {game}",
+        f"\u2615 **Started:** {ts_str}",
+    ]
+
     embed = discord.Embed(
-        title=f"🔴  {title}",
         url=f"https://twitch.tv/{login}",
-        color=0x9146FF,
-    )
-
-    embed.add_field(name="🎮 Game",    value=game,   inline=True)
-
-    if viewer_count is not None:
-        embed.add_field(
-            name="👥 Viewers",
-            value=f"{viewer_count:,}",
-            inline=True,
-        )
-
-    embed.add_field(
-        name="📺 Watch",
-        value=f"[twitch.tv/{login}](https://twitch.tv/{login})",
-        inline=True,
+        description="\n".join(desc_lines),
+        color=0xFFB6C1,  # baby pink
     )
 
     embed.set_image(url=thumbnail)
-    embed.set_footer(text="Live on Twitch")
+    embed.set_footer(text="Vibes: Very Cool")
+    embed.timestamp = discord.utils.utcnow()
 
     return embed
 
@@ -231,9 +237,15 @@ async def handle_stream_online(bot, event: dict) -> None:
         return
 
     # ── Detect changes vs previous cached metadata ─────────────
+    # Normalise keys: detect_changes uses "game", cache uses "game_name"
     old_raw    = await redis_client.get(_meta_key(login))
     old_stream = json.loads(old_raw) if old_raw else None
-    changes    = detect_changes(old_stream, new_stream) if old_stream else {}
+    if old_stream and "game_name" in old_stream:
+        old_stream["game"] = old_stream.pop("game_name")
+    new_norm = dict(new_stream)
+    if "game_name" in new_norm:
+        new_norm["game"] = new_norm.pop("game_name")
+    changes = detect_changes(old_stream, new_norm) if old_stream else {}
 
     # Update metadata cache
     await redis_client.set(_meta_key(login), json.dumps(new_stream), ttl=META_TTL)
