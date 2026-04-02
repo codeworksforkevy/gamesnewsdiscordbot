@@ -221,19 +221,37 @@ async def handle_stream_online(bot, event: dict) -> None:
         except Exception:
             pass
 
+    # Wait briefly so Twitch has time to generate the stream thumbnail
+    # Without this, the embed image is often a black/blank frame
+    await asyncio.sleep(20)
+
     # Per-guild posting
     for guild in bot.guilds:
         try:
             # KevKevvy gets her own dedicated channel
+            # Falls back to announce_channel_id if dedicated channel not found
             if user_login == KEVKEVVY_LOGIN:
                 channel_id   = KEVKEVVY_CHANNEL_ID
-                show_viewers = False  # viewer count hidden everywhere
+                show_viewers = False
+                # Verify the channel exists, fall back to guild config if not
+                try:
+                    test_ch = guild.get_channel(channel_id)
+                    if not test_ch:
+                        await bot.fetch_channel(channel_id)
+                except Exception:
+                    # Dedicated channel not accessible — fall back to announce channel
+                    config = await get_guild_config(guild.id)
+                    channel_id = config.get("announce_channel_id") if config else None
+                    logger.warning(
+                        f"Kevy dedicated channel {KEVKEVVY_CHANNEL_ID} not found "
+                        f"— falling back to announce channel {channel_id}"
+                    )
             else:
                 config = await get_guild_config(guild.id)
                 if not config:
                     continue
                 channel_id   = config.get("announce_channel_id")
-                show_viewers = False  # no viewer count in friends-streams
+                show_viewers = False
 
             if not channel_id:
                 continue
@@ -348,3 +366,111 @@ async def handle_stream_offline(bot, event: dict) -> None:
 
         except Exception as e:
             logger.error(f"🔴 Offline post failed for {user_login} in {guild.id}: {e}")
+
+
+# ──────────────────────────────────────────────────────────────
+# STREAM UPDATE (title / game change via channel.update EventSub)
+# ──────────────────────────────────────────────────────────────
+
+async def handle_stream_update(bot, event: dict) -> None:
+    """
+    Called when Twitch fires a channel.update event.
+    - Edits the existing live embed silently
+    - Posts a small amber notice showing what changed
+    """
+    user_login = event.get("broadcaster_user_login", "").lower()
+    user_name  = event.get("broadcaster_user_name", user_login)
+    new_title  = event.get("title", "")
+    new_game   = event.get("category_name", "")
+
+    logger.info(f"📡 stream_update: {user_login} title={new_title!r} game={new_game!r}")
+
+    # Only act if the stream is live
+    if await redis_client.get(_status_key(user_login)) != "live":
+        return
+
+    # Fetch fresh metadata
+    stream = user_info = None
+    try:
+        api = bot.app_state.twitch_api
+        if api:
+            results   = await api.get_streams_by_logins([user_login])
+            stream    = results[0] if results else {"title": new_title, "game_name": new_game}
+            user_info = await api.get_user_by_login(user_login)
+    except Exception as e:
+        logger.warning(f"Metadata fetch failed for update {user_login}: {e}")
+        stream = {"title": new_title, "game_name": new_game}
+
+    for guild in bot.guilds:
+        try:
+            if user_login == KEVKEVVY_LOGIN:
+                channel_id = KEVKEVVY_CHANNEL_ID
+            else:
+                config = await get_guild_config(guild.id)
+                if not config:
+                    continue
+                channel_id = config.get("announce_channel_id")
+
+            if not channel_id:
+                continue
+
+            channel = guild.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            if not channel:
+                continue
+
+            # ── Edit live embed ───────────────────────────────────────
+            stored = await redis_client.get(_msg_key(user_login, guild.id))
+            if stored:
+                try:
+                    msg = await channel.fetch_message(int(stored))
+                    await msg.edit(embed=_build_live_embed(user_login, user_name, stream, user_info))
+                    logger.info(f"✅ Edited embed for {user_login} in {guild.name}")
+                except (discord.NotFound, discord.HTTPException) as e:
+                    logger.warning(f"Could not edit embed: {e}")
+
+            # ── What changed? ─────────────────────────────────────────
+            old_info = {}
+            try:
+                raw = await redis_client.get(f"stream:last:{user_login}")
+                if raw:
+                    old_info = json.loads(raw)
+            except Exception:
+                pass
+
+            lines = []
+            if old_info.get("title") not in (None, "", new_title):
+                lines.append(f"📝 ~~{old_info['title']}~~\n→ **{new_title}**")
+            if new_game and old_info.get("game_name") not in (None, "", new_game):
+                lines.append(f"🎮 ~~{old_info['game_name']}~~ → **{new_game}**")
+
+            if lines:
+                notice = discord.Embed(
+                    title="📡 Stream Updated",
+                    description="\n".join(lines),
+                    url=f"https://twitch.tv/{user_login}",
+                    color=0xF5A623,
+                )
+                notice.set_footer(text=f"twitch.tv/{user_login}")
+                notice.timestamp = discord.utils.utcnow()
+                await channel.send(embed=notice)
+
+        except Exception as e:
+            logger.error(f"🔴 stream_update failed for {user_login} in {guild.id}: {e}")
+
+    # Update cached info
+    try:
+        old_cache = {}
+        raw = await redis_client.get(f"stream:last:{user_login}")
+        if raw:
+            old_cache = json.loads(raw)
+        await redis_client.set(
+            f"stream:last:{user_login}",
+            json.dumps({
+                "title":      new_title,
+                "game_name":  new_game,
+                "started_at": old_cache.get("started_at"),
+            }),
+            ttl=LIVE_TTL,
+        )
+    except Exception:
+        pass
