@@ -209,6 +209,14 @@ async def _add_missing_columns(db) -> None:
     except Exception:
         pass
 
+    # target_channel_id — per-streamer override channel (optional)
+    try:
+        await db.execute(
+            "ALTER TABLE streamers ADD COLUMN IF NOT EXISTS target_channel_id BIGINT"
+        )
+    except Exception:
+        pass
+
     logger.info("Columns verified/added")
 
 
