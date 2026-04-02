@@ -235,6 +235,7 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_ready() -> None:
+    bot.start_time = discord.utils.utcnow()  # for /curie_status uptime
     logger.info(
         "Bot ready",
         extra={"extra_data": {
