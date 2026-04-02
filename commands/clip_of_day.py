@@ -269,15 +269,37 @@ async def register(bot, app_state, session):
     ):
         await interaction.response.defer()
 
-        days = max(1, min(30, days))
+        days  = max(1, min(30, days))
         login = streamer.strip().lower()
+
+        # Verify streamer is tracked in this server
+        try:
+            row = await app_state.db.fetchrow(
+                "SELECT 1 FROM streamers WHERE twitch_login = $1 AND guild_id = $2",
+                login, interaction.guild_id,
+            )
+            if not row:
+                # Get tracked list to suggest
+                rows = await app_state.db.fetch(
+                    "SELECT twitch_login FROM streamers WHERE guild_id = $1 ORDER BY twitch_login",
+                    interaction.guild_id,
+                )
+                names = ", ".join(f"`{r['twitch_login']}`" for r in rows) or "none yet"
+                await interaction.followup.send(
+                    f"❌ **{login}** is not in the tracked list for this server.\n"
+                    f"Tracked streamers: {names}",
+                    ephemeral=True,
+                )
+                return
+        except Exception as e:
+            logger.warning(f"/clip DB check failed: {e}")
 
         clip = await _fetch_top_clip(app_state.twitch_api, login, days=days)
 
         if not clip:
             await interaction.followup.send(
                 f"😔 No clips found for **{login}** in the past {days} day(s).\n"
-                f"They may not have any clips yet, or the name is misspelled.",
+                f"They may not have streamed or had any clips during this period.",
                 ephemeral=True,
             )
             return
