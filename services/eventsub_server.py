@@ -6,7 +6,7 @@ import logging
 import os
 
 from aiohttp import web
-from services.event_router import handle_stream_online, handle_stream_offline
+from services.event_router import handle_stream_online, handle_stream_offline, handle_stream_update
 
 logger = logging.getLogger("eventsub_server")
 
@@ -92,6 +92,10 @@ async def handle_eventsub(request: web.Request):
                 logger.info(f"⚫ Stream OFFLINE: {login}")
                 loop.create_task(handle_stream_offline(bot, event))
                 logger.info(f"✅ Task created for handle_stream_offline({login})")
+
+            elif sub_type == "channel.update":
+                logger.info(f"📡 Channel UPDATE: {login}")
+                loop.create_task(handle_stream_update(bot, event))
 
             else:
                 logger.warning(f"Unhandled EventSub type: {sub_type}")
