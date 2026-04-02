@@ -236,7 +236,7 @@ class EventSubManager:
         """
         existing = await self._existing_subscriptions(broadcaster_user_id)
 
-        wanted = ["stream.online", "stream.offline"]
+        wanted = ["stream.online", "stream.offline", "channel.update"]
 
         for event_type in wanted:
             if event_type in existing:
