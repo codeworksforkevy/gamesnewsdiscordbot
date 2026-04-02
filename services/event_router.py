@@ -48,14 +48,14 @@ def _build_live_embed(
     user_name:  str,
     stream:     dict | None,
     user_info:  dict | None = None,
-    show_viewers: bool = False,   # viewer count hidden by default
+    show_viewers: bool = False,
 ) -> discord.Embed:
-    title      = (stream.get("title") if stream else None) or "No Title"
-    game       = (stream.get("game_name") if stream else None) or "Creative / Art"
+    title      = (stream.get("title") if stream else None) or ""
+    game       = (stream.get("game_name") if stream else None) or "Just Chatting"
     started_at = stream.get("started_at", "") if stream else ""
 
-    if not game or game.lower() == "unknown":
-        game = "Creative / Art"
+    if not game or game.lower() in ("unknown", ""):
+        game = "Just Chatting"
 
     stream_url = f"https://www.twitch.tv/{user_login}"
 
@@ -67,34 +67,38 @@ def _build_live_embed(
         except Exception:
             pass
 
-    # Description — no viewer count for friends-streams
-    desc_lines = [
-        f"👩‍🔬 **Project:** {title}",
-        f"👩‍💻 **Game:** `{game}`",
-        f"☕ **Started:** {ts_str}",
+    # Build description: stream title then game + started
+    desc_lines = []
+    if title:
+        desc_lines.append(title)
+    desc_lines += [
+        f"Game: {game}",
+        f"Started: {ts_str}",
     ]
     if show_viewers and stream and stream.get("viewer_count"):
-        desc_lines.insert(2, f"👥 **Viewers:** {stream['viewer_count']:,}")
+        desc_lines.append(f"Viewers: {stream['viewer_count']:,}")
 
     embed = discord.Embed(
-        title=f"🎬 {title}",
         url=stream_url,
         description="\n".join(desc_lines),
-        color=0xFFB6C1,  # Kevy pink
+        color=0xFFB6C1,  # baby pink
     )
 
     icon_url = user_info.get("profile_image_url") if user_info else None
-    embed.set_author(name=user_name, url=stream_url, icon_url=icon_url)
+    embed.set_author(
+        name=f"{user_name} is live on Twitch!",
+        url=stream_url,
+        icon_url=icon_url,
+    )
 
     raw_thumb = stream.get("thumbnail_url", "") if stream else ""
     if raw_thumb:
         thumb = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
         embed.set_image(url=f"{thumb}?v={int(time.time())}")
 
-    embed.set_footer(text="🧪 Atmosphere: Very Cool")
+    embed.set_footer(text="Vibes: Very Cool")
     embed.timestamp = discord.utils.utcnow()
     return embed
-
 
 def _build_offline_embed(
     user_login:  str,
@@ -113,11 +117,11 @@ def _build_offline_embed(
     - Dark background colour
     """
     stream_url = f"https://twitch.tv/{user_login}"
-    title_text = (stream_info.get("title") if stream_info else None) or "No Title"
-    game       = (stream_info.get("game_name") if stream_info else None) or "Creative / Art"
+    title_text = (stream_info.get("title") if stream_info else None) or ""
+    game       = (stream_info.get("game_name") if stream_info else None) or "Just Chatting"
 
     embed = discord.Embed(
-        description=f"*{title_text}*",
+        description=f"*{title_text}*" if title_text else None,
         color=0x2f3136,
     )
 
@@ -130,16 +134,15 @@ def _build_offline_embed(
     )
 
     # Three inline fields: Game | Duration | VOD
-    embed.add_field(name="🎮 Game",      value=game,                                     inline=True)
-    embed.add_field(name="🕐 Duration",  value=duration or "Unknown",                    inline=True)
+    embed.add_field(name="🕹️ Game",    value=game,                                   inline=True)
+    embed.add_field(name="Duration",   value=duration or "Unknown",                  inline=True)
     embed.add_field(
-        name="📹 VOD",
-        value=f"[Click to watch]({vod_url})" if vod_url
+        name="🖳 VOD",
+        value=f"[Click to view]({vod_url})" if vod_url
               else f"[Videos](https://www.twitch.tv/{user_login}/videos)",
         inline=True,
     )
 
-    # Footer: "Stream ended • twitch.tv/<login>"
     embed.set_footer(text=f"Stream ended • twitch.tv/{user_login}")
     embed.timestamp = datetime.now(timezone.utc)
     return embed
@@ -295,12 +298,13 @@ async def handle_stream_offline(bot, event: dict) -> None:
     vod_url     = None
     duration    = None
 
+    # ── Step 1: Try Redis cache (set during handle_stream_online) ──────────
     try:
         raw = await redis_client.get(f"stream:last:{user_login}")
         if raw:
             stream_info = json.loads(raw)
             if stream_info.get("started_at"):
-                start = datetime.fromisoformat(
+                start    = datetime.fromisoformat(
                     stream_info["started_at"].replace("Z", "+00:00")
                 )
                 elapsed  = (datetime.now(timezone.utc) - start).total_seconds()
@@ -308,6 +312,7 @@ async def handle_stream_offline(bot, event: dict) -> None:
     except Exception:
         pass
 
+    # ── Step 2: Twitch API — user info + VOD (also fills in missing title/game) ──
     try:
         api = bot.app_state.twitch_api
         if api:
@@ -318,9 +323,61 @@ async def handle_stream_offline(bot, event: dict) -> None:
                     params={"user_id": user_info["id"], "type": "archive", "first": 1}
                 )
                 if vod_data and vod_data.get("data"):
-                    vod_url = vod_data["data"][0].get("url")
+                    vod      = vod_data["data"][0]
+                    vod_url  = vod.get("url")
+
+                    # VOD has reliable title, duration, created_at
+                    # Use these to fill in missing stream_info data
+                    if not stream_info:
+                        stream_info = {}
+
+                    # Fill title if missing or "No Title"
+                    if not stream_info.get("title") and vod.get("title"):
+                        stream_info["title"] = vod["title"]
+
+                    # Calculate duration from VOD duration string (e.g. "3h22m30s")
+                    if not duration and vod.get("duration"):
+                        try:
+                            import re
+                            dur_str = vod["duration"]
+                            parts   = re.findall(r'(\d+)([hms])', dur_str)
+                            secs    = sum(
+                                int(v) * {"h": 3600, "m": 60, "s": 1}[u]
+                                for v, u in parts
+                            )
+                            duration = _format_duration(secs)
+                        except Exception:
+                            pass
+
+                    # Fill started_at for duration calc if still missing
+                    if not duration and vod.get("created_at"):
+                        try:
+                            start    = datetime.fromisoformat(
+                                vod["created_at"].replace("Z", "+00:00")
+                            )
+                            elapsed  = (datetime.now(timezone.utc) - start).total_seconds()
+                            duration = _format_duration(elapsed)
+                        except Exception:
+                            pass
     except Exception as e:
-        logger.warning(f"VOD fetch failed for {user_login}: {e}")
+        logger.warning(f"VOD/user fetch failed for {user_login}: {e}")
+
+    # ── Step 3: If still missing game, fetch from streamer_states DB ────────
+    if stream_info and not stream_info.get("game_name"):
+        try:
+            db = bot.app_state.db
+            if db:
+                row = await db.fetchrow(
+                    "SELECT game_name, title FROM streamer_states WHERE twitch_user_id = $1",
+                    event.get("broadcaster_user_id", ""),
+                )
+                if row:
+                    if row["game_name"] and not stream_info.get("game_name"):
+                        stream_info["game_name"] = row["game_name"]
+                    if row["title"] and not stream_info.get("title"):
+                        stream_info["title"] = row["title"]
+        except Exception:
+            pass
 
     offline_embed = _build_offline_embed(
         user_login, user_name,
