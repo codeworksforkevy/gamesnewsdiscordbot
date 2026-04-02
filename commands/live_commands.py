@@ -18,57 +18,90 @@ logger = logging.getLogger("live-commands")
 def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     login      = stream.get("user_login") or user.get("login", "unknown")
     name       = stream.get("user_name")  or user.get("display_name", login)
-    title      = stream.get("title", "Untitled stream")
-    game       = stream.get("game_name", "Unknown game")
-    viewers    = stream.get("viewer_count", 0)
+    title      = stream.get("title", "") or ""
+    game       = stream.get("game_name", "") or "Just Chatting"
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
-    started_str = ""
+    if not game or game.lower() in ("unknown", "unknown game", ""):
+        game = "Just Chatting"
+
+    ts_str = "now"
     if started_at:
         try:
-            dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-            ts = int(dt.timestamp())
-            started_str = f"\n🕐 Live since <t:{ts}:R>"
+            dt     = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            ts_str = f"<t:{int(dt.timestamp())}:R>"
         except Exception:
             pass
+
+    # Stream title direkt, etiket yok
+    desc_lines = []
+    if title:
+        desc_lines.append(title)
+    desc_lines += [
+        f"\U0001f469\u200d\U0001f4bb **Game:** {game}",
+        f"\u2615 **Started:** {ts_str}",
+    ]
 
     raw_thumb = stream.get("thumbnail_url", "")
     thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
 
     embed = discord.Embed(
-        title=title,
         url=stream_url,
-        description=(
-            f"**{name}** is live on Twitch!\n\n"
-            f"🎮 **{game}**\n"
-            f"👀 **{viewers:,}** viewers"
-            f"{started_str}"
-        ),
-        color=0x9146FF,
+        description="\n".join(desc_lines),
+        color=0xFFB6C1,  # baby pink
     )
 
     embed.set_author(
-        name=f"{name} is live!",
+        name=name,
         url=stream_url,
         icon_url=user.get("profile_image_url"),
     )
 
     if thumbnail:
-        embed.set_image(url=thumbnail)
+        import time as _time
+        embed.set_image(url=f"{thumbnail}?v={int(_time.time())}")
 
-    embed.set_footer(text="🟣 Live on Twitch")
+    embed.set_footer(text="Vibes: Very Cool")
+    embed.timestamp = discord.utils.utcnow()
     return embed
 
 
-def build_offline_embed(login: str, display_name: str) -> discord.Embed:
-    now_ts = int(datetime.now(timezone.utc).timestamp())
+def build_offline_embed(
+    login:        str,
+    display_name: str,
+    stream_info:  dict | None = None,
+    vod_url:      str  | None = None,
+    duration:     str  | None = None,
+    user_info:    dict | None = None,
+) -> discord.Embed:
+    stream_url = f"https://twitch.tv/{login}"
+    title_text = (stream_info.get("title") if stream_info else None) or ""
+    game       = (stream_info.get("game_name") if stream_info else None) or "Just Chatting"
+
     embed = discord.Embed(
-        title=f"{display_name} is now offline",
-        description=f"Stream ended <t:{now_ts}:R>",
-        color=0x808080,
+        description=f"*{title_text}*" if title_text else None,
+        color=0x2f3136,
     )
-    embed.set_footer(text="⚫ Stream ended")
+
+    icon_url = user_info.get("profile_image_url") if user_info else None
+    embed.set_author(
+        name=f"{display_name} was live on Twitch",
+        url=stream_url,
+        icon_url=icon_url,
+    )
+
+    embed.add_field(name="🕹️ Game",  value=game,                                   inline=True)
+    embed.add_field(name="Duration", value=duration or "Unknown",                  inline=True)
+    embed.add_field(
+        name="🖳 VOD",
+        value=f"[Click to view]({vod_url})" if vod_url
+              else f"[Videos](https://www.twitch.tv/{login}/videos)",
+        inline=True,
+    )
+
+    embed.set_footer(text=f"Stream ended • twitch.tv/{login}")
+    embed.timestamp = datetime.now(timezone.utc)
     return embed
 
 
@@ -77,13 +110,13 @@ def build_offline_embed(login: str, display_name: str) -> discord.Embed:
 # ==================================================
 
 async def ensure_live_role(guild: discord.Guild) -> discord.Role | None:
-    role = discord.utils.get(guild.roles, name="Live")
+    role = discord.utils.get(guild.roles, name="🟢 Live")
     if role:
         return role
     try:
         role = await guild.create_role(
-            name="Live",
-            color=discord.Color.from_rgb(145, 70, 255),
+            name="🟢 Live",
+            color=discord.Color.green(),
             mentionable=True,
             reason="Auto-created by Find a Curie bot",
         )
@@ -119,7 +152,7 @@ async def assign_live_role(guild: discord.Guild, twitch_login: str) -> None:
 
 
 async def remove_live_role(guild: discord.Guild, twitch_login: str) -> None:
-    role = discord.utils.get(guild.roles, name="Live")
+    role = discord.utils.get(guild.roles, name="🟢 Live")
     if not role:
         return
     login_lower = twitch_login.lower()
@@ -400,12 +433,68 @@ class StreamMonitor:
     async def _post_offline(self, guild, channel_id, login, prev, state_key):
         try:
             channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+
+            # Build rich offline embed
+            stream_info = {
+                "title":     prev.get("title", ""),
+                "game_name": prev.get("game", ""),
+            }
+            duration  = None
+            vod_url   = None
+            user_info = None
+
+            started_at = prev.get("started_at", "")
+            if started_at:
+                try:
+                    start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                    elapsed  = (datetime.now(timezone.utc) - start_dt).total_seconds()
+                    h, rem   = divmod(int(elapsed), 3600)
+                    m, s     = divmod(rem, 60)
+                    duration = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
+                except Exception:
+                    pass
+
+            try:
+                api = self.app_state.twitch_api
+                if api:
+                    user_info = await api.get_user_by_login(login)
+                    if user_info:
+                        vod_data = await api.request(
+                            "videos",
+                            params={"user_id": user_info["id"], "type": "archive", "first": 1},
+                        )
+                        if vod_data and vod_data.get("data"):
+                            vod = vod_data["data"][0]
+                            vod_url = vod.get("url")
+                            if not stream_info["title"] and vod.get("title"):
+                                stream_info["title"] = vod["title"]
+                            if not duration and vod.get("duration"):
+                                import re as _re
+                                parts = _re.findall(r'(\d+)([hms])', vod["duration"])
+                                secs  = sum(int(v) * {"h":3600,"m":60,"s":1}[u] for v,u in parts)
+                                h2, r = divmod(secs, 3600); m2, s2 = divmod(r, 60)
+                                duration = f"{h2}h {m2}m {s2}s" if h2 else f"{m2}m {s2}s"
+            except Exception as e:
+                logger.warning(f"VOD fetch failed for {login}: {e}")
+
+            offline_embed = build_offline_embed(
+                login, login.capitalize(),
+                stream_info=stream_info,
+                vod_url=vod_url,
+                duration=duration,
+                user_info=user_info,
+            )
+
             if channel and prev.get("message_id"):
                 try:
                     msg = await channel.fetch_message(prev["message_id"])
-                    await msg.edit(embed=build_offline_embed(login, login.capitalize()))
+                    await msg.edit(embed=offline_embed)
                 except discord.NotFound:
-                    pass
+                    if channel:
+                        await channel.send(embed=offline_embed)
+            elif channel:
+                await channel.send(embed=offline_embed)
+
             self._state[state_key] = {"live": False}
             logger.info(f"{login} went offline in {guild.name}")
 
