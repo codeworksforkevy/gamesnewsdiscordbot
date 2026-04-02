@@ -67,7 +67,7 @@ async def _fetch_schedule(api, user_login: str) -> list[dict]:
 
             results.append({
                 "title":          seg.get("title") or "Untitled stream",
-                "category":       seg.get("category", {}).get("name") if seg.get("category") else "Unknown",
+                "category":       seg.get("category", {}).get("name") if seg.get("category") else "TBA",
                 "start_ts":       int(start.timestamp()),
                 "end_ts":         end_ts,
                 "canceled":       seg.get("canceled_until") is not None,
@@ -211,7 +211,29 @@ async def register(bot, app_state, session):
 
         # ── Single streamer ──────────────────────────────────────
         if streamer:
-            login    = streamer.strip().lower()
+            login = streamer.strip().lower()
+
+            # Must be in tracked list for this server
+            try:
+                row = await app_state.db.fetchrow(
+                    "SELECT 1 FROM streamers WHERE twitch_login = $1 AND guild_id = $2",
+                    login, interaction.guild_id,
+                )
+                if not row:
+                    rows = await app_state.db.fetch(
+                        "SELECT twitch_login FROM streamers WHERE guild_id = $1 ORDER BY twitch_login",
+                        interaction.guild_id,
+                    )
+                    names = ", ".join(f"`{r['twitch_login']}`" for r in rows) or "none yet"
+                    await interaction.followup.send(
+                        f"❌ **{login}** is not in the tracked list.\n"
+                        f"Tracked streamers: {names}",
+                        ephemeral=True,
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"/schedule DB check failed: {e}")
+
             user     = await api.get_user_by_login(login)
             segments = await _fetch_schedule(api, login)
 
