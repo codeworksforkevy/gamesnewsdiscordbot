@@ -22,7 +22,10 @@ logger = logging.getLogger("clip-of-day")
 # ──────────────────────────────────────────────────────────────
 
 async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
-    """Fetch the top clip for a streamer in the past N days."""
+    """
+    Fetch the top clip for a streamer in the past N days.
+    Returns None if no clip was created within the time window.
+    """
     try:
         user = await api.get_user_by_login(user_login)
         if not user:
@@ -32,17 +35,32 @@ async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
             datetime.now(timezone.utc) - timedelta(days=days)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         data = await api.request(
             "clips",
             params={
                 "broadcaster_id": user["id"],
                 "first":          1,
                 "started_at":     started_at,
+                "ended_at":       ended_at,
             },
         )
 
         if not data or not data.get("data"):
             return None
+
+        # Double-check: clip must actually be within the window
+        clip_raw     = data["data"][0]
+        clip_created = clip_raw.get("created_at", "")
+        if clip_created:
+            try:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+                clip_dt = datetime.fromisoformat(clip_created.replace("Z", "+00:00"))
+                if clip_dt < cutoff:
+                    return None  # clip predates window — don't post
+            except Exception:
+                pass
 
         clip = data["data"][0]
         return {
@@ -88,9 +106,9 @@ def _build_clip_embed(clip: dict, user_login: str) -> discord.Embed:
         icon_url=clip.get("profile_image", ""),
     )
 
-    embed.add_field(name="👀 Views",    value=f"{clip['view_count']:,}", inline=True)
-    embed.add_field(name="⏱️ Duration", value=duration_str,             inline=True)
-    embed.add_field(name="✂️ Clipped by", value=clip["creator"],         inline=True)
+    embed.add_field(name="Views",    value=f"{clip['view_count']:,}", inline=True)
+    embed.add_field(name="Duration", value=duration_str,             inline=True)
+    embed.add_field(name="Clipped by", value=clip["creator"],         inline=True)
 
     if created_ts:
         embed.add_field(name="📅 Clipped", value=created_ts, inline=True)
@@ -130,27 +148,39 @@ async def _clip_of_day_loop(bot, app_state):
 
 
 async def _streamed_today(api, user_login: str) -> bool:
-    """Returns True if the streamer had a stream in the past 24 hours."""
+    """
+    Returns True if the streamer had a VOD created in the past 24 hours.
+    Uses /videos with type=archive and checks created_at manually —
+    the Twitch API does not support date-based filtering on /videos directly.
+    """
     try:
         user = await api.get_user_by_login(user_login)
         if not user:
             return False
 
-        from datetime import timedelta
-        started_at = (
-            datetime.now(timezone.utc) - timedelta(hours=24)
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
-
         data = await api.request(
             "videos",
             params={
-                "user_id":    user["id"],
-                "type":       "archive",
-                "first":      1,
-                "after":      started_at,
+                "user_id": user["id"],
+                "type":    "archive",
+                "first":   5,
             },
         )
-        return bool(data and data.get("data"))
+        if not data or not data.get("data"):
+            return False
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        for vod in data["data"]:
+            created_str = vod.get("created_at", "")
+            if not created_str:
+                continue
+            try:
+                created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                if created >= cutoff:
+                    return True
+            except Exception:
+                continue
+        return False
     except Exception:
         return False
 
@@ -218,8 +248,11 @@ async def _post_daily_clips(bot, app_state):
 
 async def register(bot, app_state, session):
 
-    # Start background daily task
-    asyncio.create_task(_clip_of_day_loop(bot, app_state), name="clip-of-day")
+    # Start background daily task — registered via on_ready so bot is fully initialised
+    @bot.listen("on_ready")
+    async def _start_clip_loop():
+        if not any(t.get_name() == "clip-of-day" for t in asyncio.all_tasks()):
+            asyncio.create_task(_clip_of_day_loop(bot, app_state), name="clip-of-day")
 
     @bot.tree.command(
         name="clip",
