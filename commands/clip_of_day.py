@@ -36,8 +36,8 @@ async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
             "clips",
             params={
                 "broadcaster_id": user["id"],
-                "first":           1,
-                "started_at":      started_at,
+                "first":          1,
+                "started_at":     started_at,
             },
         )
 
@@ -46,15 +46,15 @@ async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
 
         clip = data["data"][0]
         return {
-            "title":         clip.get("title", "Untitled"),
-            "url":           clip.get("url", ""),
-            "thumbnail":     clip.get("thumbnail_url", ""),
-            "view_count":    clip.get("view_count", 0),
-            "duration":      clip.get("duration", 0),
-            "creator":       clip.get("creator_name", "Unknown"),
-            "created_at":    clip.get("created_at", ""),
-            "broadcaster":   clip.get("broadcaster_name", user_login),
-            "game":          clip.get("game_id", ""),
+            "title":        clip.get("title", "Untitled"),
+            "url":          clip.get("url", ""),
+            "thumbnail":    clip.get("thumbnail_url", ""),
+            "view_count":   clip.get("view_count", 0),
+            "duration":     clip.get("duration", 0),
+            "creator":      clip.get("creator_name", "Unknown"),
+            "created_at":   clip.get("created_at", ""),
+            "broadcaster":  clip.get("broadcaster_name", user_login),
+            "game":         clip.get("game_id", ""),
             "profile_image": user.get("profile_image_url", ""),
         }
     except Exception as e:
@@ -89,8 +89,8 @@ def _build_clip_embed(clip: dict, user_login: str) -> discord.Embed:
     )
 
     embed.add_field(name="👀 Views",    value=f"{clip['view_count']:,}", inline=True)
-    embed.add_field(name="⏱️ Duration", value=duration_str,               inline=True)
-    embed.add_field(name="✂️ Clipped by", value=clip["creator"],           inline=True)
+    embed.add_field(name="⏱️ Duration", value=duration_str,             inline=True)
+    embed.add_field(name="✂️ Clipped by", value=clip["creator"],         inline=True)
 
     if created_ts:
         embed.add_field(name="📅 Clipped", value=created_ts, inline=True)
@@ -110,9 +110,6 @@ def _build_clip_embed(clip: dict, user_login: str) -> discord.Embed:
 
 async def _clip_of_day_loop(bot, app_state):
     """Posts the top clip of the week for each tracked streamer, daily at midnight UTC."""
-    
-    logger.info("🎬 Clip-of-day loop is waiting for signal...")
-    # Botun hazır olduğundan emin olmak için ek güvenlik önlemi
     await bot.wait_until_ready()
     logger.info("🎬 Clip-of-day loop started")
 
@@ -124,7 +121,6 @@ async def _clip_of_day_loop(bot, app_state):
         )
         sleep_secs = (tomorrow - now).total_seconds()
         logger.info(f"🎬 Next clip-of-day post in {sleep_secs/3600:.1f}h")
-        
         await asyncio.sleep(sleep_secs)
 
         try:
@@ -133,7 +129,37 @@ async def _clip_of_day_loop(bot, app_state):
             logger.error(f"🎬 Daily clip task failed: {e}", exc_info=True)
 
 
+async def _streamed_today(api, user_login: str) -> bool:
+    """Returns True if the streamer had a stream in the past 24 hours."""
+    try:
+        user = await api.get_user_by_login(user_login)
+        if not user:
+            return False
+
+        from datetime import timedelta
+        started_at = (
+            datetime.now(timezone.utc) - timedelta(hours=24)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        data = await api.request(
+            "videos",
+            params={
+                "user_id":    user["id"],
+                "type":       "archive",
+                "first":      1,
+                "after":      started_at,
+            },
+        )
+        return bool(data and data.get("data"))
+    except Exception:
+        return False
+
+
 async def _post_daily_clips(bot, app_state):
+    """
+    Posts the top clip of the day — but ONLY if the streamer actually
+    streamed in the past 24 hours. No stream = no clip post.
+    """
     db  = app_state.db
     api = app_state.twitch_api
 
@@ -152,10 +178,16 @@ async def _post_daily_clips(bot, app_state):
 
     for row in rows:
         login = row["twitch_login"]
-        clip  = await _fetch_top_clip(api, login, days=7)
 
+        # Only post if they actually streamed today
+        had_stream = await _streamed_today(api, login)
+        if not had_stream:
+            logger.info(f"🎬 {login} didn't stream today — skipping clip")
+            continue
+
+        clip = await _fetch_top_clip(api, login, days=1)  # just today's clips
         if not clip or not clip["url"]:
-            logger.info(f"🎬 No clip found for {login} — skipping")
+            logger.info(f"🎬 No clip found for {login} today — skipping")
             continue
 
         embed = _build_clip_embed(clip, login)
@@ -173,11 +205,11 @@ async def _post_daily_clips(bot, app_state):
                 channel = guild.get_channel(channel_id) or await bot.fetch_channel(channel_id)
                 if channel:
                     await channel.send(embed=embed)
-                    logger.info(f"🎬 Posted clip for {login} in {guild.name}")
+                    logger.info(f"🎬 Posted today's top clip for {login} in {guild.name}")
             except Exception as e:
                 logger.warning(f"🎬 Failed to post clip in guild {guild.id}: {e}")
 
-        await asyncio.sleep(1)  # be gentle with Discord rate limits
+        await asyncio.sleep(1)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -185,16 +217,9 @@ async def _post_daily_clips(bot, app_state):
 # ──────────────────────────────────────────────────────────────
 
 async def register(bot, app_state, session):
-    """Register commands and start the background task safely."""
 
-    # FIX: 'Client has not been properly initialised' hatasını çözmek için 
-    # döngüyü bot hazır olduğunda tetiklenen bir event içine alıyoruz.
-    @bot.event
-    async def on_ready():
-        if not hasattr(bot, "clip_of_day_task_started"):
-            bot.clip_of_day_task_started = True
-            asyncio.create_task(_clip_of_day_loop(bot, app_state), name="clip-of-day")
-            logger.info("🎬 Clip-of-day background task has been scheduled.")
+    # Start background daily task
+    asyncio.create_task(_clip_of_day_loop(bot, app_state), name="clip-of-day")
 
     @bot.tree.command(
         name="clip",
@@ -217,9 +242,8 @@ async def register(bot, app_state, session):
         clip = await _fetch_top_clip(app_state.twitch_api, login, days=days)
 
         if not clip:
-            # Emoji 👩‍🔬 (Woman Scientist) olarak güncellendi.
             await interaction.followup.send(
-                f"👩‍🔬 No clips found for **{login}** in the past {days} day(s).\n"
+                f"😔 No clips found for **{login}** in the past {days} day(s).\n"
                 f"They may not have any clips yet, or the name is misspelled.",
                 ephemeral=True,
             )
