@@ -1,7 +1,7 @@
 """
 cogs/live_role_cog.py
 ────────────────────────────────────────────────────────────────
-Manages a "🔴 Live" Discord role that is automatically:
+Manages a "🟢 Live" Discord role that is automatically:
   - Created in each guild if it doesn't already exist
   - Assigned to a member when their linked Twitch stream goes live
   - Removed when the stream ends
@@ -43,8 +43,8 @@ from db.guild_settings import get_guild_config
 logger = logging.getLogger("live-role-cog")
 
 # Role appearance
-ROLE_NAME  = "🔴 Live"
-ROLE_COLOR = discord.Color(0x89CFF0)   # Baby blue
+ROLE_NAME  = "🟢 Live"
+ROLE_COLOR = discord.Color.green()     # Green — matches 🟢 emoji
 ROLE_HOIST = True                       # Show separately in member list
 
 
