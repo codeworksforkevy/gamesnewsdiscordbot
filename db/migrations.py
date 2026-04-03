@@ -130,6 +130,16 @@ async def _create_tables(db) -> None:
             ON stream_history (twitch_login, started_at DESC)
     """)
 
+    # user_notifications — per-user DM subscriptions
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_notifications (
+            user_id      BIGINT  NOT NULL,
+            guild_id     BIGINT  NOT NULL,
+            twitch_login TEXT    NOT NULL,
+            PRIMARY KEY (user_id, twitch_login)
+        )
+    """)
+
     logger.info("Tables verified/created")
 
 
