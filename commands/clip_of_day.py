@@ -21,7 +21,7 @@ logger = logging.getLogger("clip-of-day")
 # HELPERS
 # ──────────────────────────────────────────────────────────────
 
-async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
+async def _fetch_top_clip(api, user_login: str, days: int | None = 7) -> dict | None:
     """
     Fetch the top clip for a streamer in the past N days.
     Returns None if no clip was created within the time window.
@@ -31,34 +31,28 @@ async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
         if not user:
             return None
 
-        started_at = (
-            datetime.now(timezone.utc) - timedelta(days=days)
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Build params — days=None means all time (no date filter)
+        params: dict = {"broadcaster_id": user["id"], "first": 1}
+        if days is not None:
+            params["started_at"] = (
+                datetime.now(timezone.utc) - timedelta(days=days)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            params["ended_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        data = await api.request(
-            "clips",
-            params={
-                "broadcaster_id": user["id"],
-                "first":          1,
-                "started_at":     started_at,
-                "ended_at":       ended_at,
-            },
-        )
+        data = await api.request("clips", params=params)
 
         if not data or not data.get("data"):
             return None
 
-        # Double-check: clip must actually be within the window
+        # Date guard — only applies when a window is set
         clip_raw     = data["data"][0]
         clip_created = clip_raw.get("created_at", "")
-        if clip_created:
+        if days is not None and clip_created:
             try:
-                cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+                cutoff  = datetime.now(timezone.utc) - timedelta(days=days)
                 clip_dt = datetime.fromisoformat(clip_created.replace("Z", "+00:00"))
                 if clip_dt < cutoff:
-                    return None  # clip predates window — don't post
+                    return None
             except Exception:
                 pass
 
@@ -266,20 +260,24 @@ async def register(bot, app_state, session):
 
     @bot.tree.command(
         name="clip",
-        description="🎬 Show the top Twitch clip from a streamer this week",
+        description="🎬 Show the top clip from a tracked streamer",
     )
     @app_commands.describe(
-        streamer="Twitch username (e.g. ninja)",
-        days="How many days to look back (1–30, default 7)",
+        streamer="Twitch username",
+        period="Time period to look in (default: this week)",
     )
+    @app_commands.choices(period=[
+        app_commands.Choice(name="This week",   value="week"),
+        app_commands.Choice(name="This month",  value="month"),
+        app_commands.Choice(name="All time",    value="all"),
+    ])
     async def clip_command(
         interaction: discord.Interaction,
         streamer: str,
-        days: int = 7,
+        period: str = "week",
     ):
         await interaction.response.defer()
 
-        days  = max(1, min(30, days))
         login = streamer.strip().lower()
 
         # Verify streamer is tracked in this server
@@ -289,7 +287,6 @@ async def register(bot, app_state, session):
                 login, interaction.guild_id,
             )
             if not row:
-                # Get tracked list to suggest
                 rows = await app_state.db.fetch(
                     "SELECT twitch_login FROM streamers WHERE guild_id = $1 ORDER BY twitch_login",
                     interaction.guild_id,
@@ -304,16 +301,21 @@ async def register(bot, app_state, session):
         except Exception as e:
             logger.warning(f"/clip DB check failed: {e}")
 
+        # Map period to days (or None for all time)
+        period_days = {"week": 7, "month": 30, "all": None}
+        days = period_days.get(period, 7)
+
         clip = await _fetch_top_clip(app_state.twitch_api, login, days=days)
 
         if not clip:
+            period_label = {"week": "this week", "month": "this month", "all": "all time"}[period]
             await interaction.followup.send(
-                f"😔 No clips found for **{login}** in the past {days} day(s).\n"
-                f"They may not have streamed or had any clips during this period.",
+                f"😔 No clips found for **{login}** ({period_label}).\n"
+                f"They may not have any clips in this period.",
                 ephemeral=True,
             )
             return
 
         embed = _build_clip_embed(clip, login)
         await interaction.followup.send(embed=embed)
-        logger.info(f"/clip {login} ({days}d) — found: {clip['title']}")
+        logger.info(f"/clip {login} period={period} — found: {clip['title']}")
