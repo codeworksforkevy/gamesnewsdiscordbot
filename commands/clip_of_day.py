@@ -80,7 +80,11 @@ async def _fetch_top_clip(api, user_login: str, days: int = 7) -> dict | None:
         return None
 
 
-def _build_clip_embed(clip: dict, user_login: str) -> discord.Embed:
+def _build_clip_embed(clip: dict, user_login: str, daily: bool = False) -> discord.Embed:
+    """
+    daily=True  → posted by the background task (Clip of the Day)
+    daily=False → posted by /clip command (user-requested)
+    """
     duration_str = f"{int(clip['duration'])}s"
     if clip["duration"] >= 60:
         m, s = divmod(int(clip["duration"]), 60)
@@ -97,26 +101,32 @@ def _build_clip_embed(clip: dict, user_login: str) -> discord.Embed:
     embed = discord.Embed(
         title=f"🎬 {clip['title']}",
         url=clip["url"],
-        color=0x9146FF,
+        color=0x003153,  # navy
     )
 
+    # Author: "streamer's Clip of the Day" or "streamer's top clip"
+    author_label = (
+        f"{clip['broadcaster']}'s Clip of the Day"
+        if daily else
+        f"{clip['broadcaster']}'s top clip"
+    )
     embed.set_author(
-        name=f"{clip['broadcaster']}'s Top Clip",
+        name=author_label,
         url=f"https://twitch.tv/{user_login}",
         icon_url=clip.get("profile_image", ""),
     )
 
-    embed.add_field(name="Views",    value=f"{clip['view_count']:,}", inline=True)
-    embed.add_field(name="Duration", value=duration_str,             inline=True)
-    embed.add_field(name="Clipped by", value=clip["creator"],         inline=True)
+    embed.add_field(name="Total views", value=f"{clip['view_count']:,}", inline=True)
+    embed.add_field(name="Length",      value=duration_str,             inline=True)
+    embed.add_field(name="Clipped by",  value=clip["creator"],          inline=True)
 
     if created_ts:
-        embed.add_field(name="📅 Clipped", value=created_ts, inline=True)
+        embed.add_field(name="Clipped", value=created_ts, inline=True)
 
     if clip.get("thumbnail"):
         embed.set_image(url=clip["thumbnail"])
 
-    embed.set_footer(text="🎬 Clip of the Day • Find a Curie")
+    embed.set_footer(text="🎬 Find a Curie")
     embed.timestamp = discord.utils.utcnow()
 
     return embed
@@ -220,7 +230,7 @@ async def _post_daily_clips(bot, app_state):
             logger.info(f"🎬 No clip found for {login} today — skipping")
             continue
 
-        embed = _build_clip_embed(clip, login)
+        embed = _build_clip_embed(clip, login, daily=True)
 
         for guild in bot.guilds:
             try:
