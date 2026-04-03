@@ -136,13 +136,24 @@ async def _clip_of_day_loop(bot, app_state):
     logger.info("🎬 Clip-of-day loop started")
 
     while True:
-        # Sleep until next midnight UTC
-        now        = datetime.now(timezone.utc)
-        tomorrow   = (now + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
+        # Post at 08:00 UTC daily = 10:00 Belgium (UTC+2) / 11:00 Turkey (UTC+3)
+        # Streamers typically go late, so clips are ready by morning
+        POST_HOUR_UTC = 8
+
+        now   = datetime.now(timezone.utc)
+        today = now.replace(hour=POST_HOUR_UTC, minute=0, second=0, microsecond=0)
+
+        # If we've already passed today's post time, schedule for tomorrow
+        if now >= today:
+            next_post = today + timedelta(days=1)
+        else:
+            next_post = today
+
+        sleep_secs = (next_post - now).total_seconds()
+        logger.info(
+            f"🎬 Next clip-of-day post at {next_post.strftime('%Y-%m-%d %H:%M UTC')} "
+            f"(in {sleep_secs/3600:.1f}h)"
         )
-        sleep_secs = (tomorrow - now).total_seconds()
-        logger.info(f"🎬 Next clip-of-day post in {sleep_secs/3600:.1f}h")
         await asyncio.sleep(sleep_secs)
 
         try:
