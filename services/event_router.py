@@ -269,7 +269,7 @@ async def handle_stream_online(bot, event: dict) -> None:
                 show_viewers=show_viewers,
             )
 
-            live_role = discord.utils.get(guild.roles, name="🔴 Live")
+            live_role = discord.utils.get(guild.roles, name="🟢 Live")
             content   = live_role.mention if live_role else None
 
             msg = await channel.send(content=content, embed=embed)
@@ -278,6 +278,99 @@ async def handle_stream_online(bot, event: dict) -> None:
 
         except Exception as e:
             logger.error(f"🔴 Post failed for {user_login} in guild {guild.id}: {e}")
+
+    # ── DM subscribers ────────────────────────────────────────────────────
+    await _notify_dm_subscribers(bot, user_login, user_name, stream, user_info)
+
+
+# ──────────────────────────────────────────────────────────────
+# DM NOTIFICATION HELPER
+# ──────────────────────────────────────────────────────────────
+
+async def _notify_dm_subscribers(
+    bot, user_login: str, user_name: str,
+    stream: dict | None, user_info: dict | None,
+) -> None:
+    """Send a DM to every user subscribed to this streamer via /notify add."""
+    try:
+        db = bot.app_state.db
+        rows = await db.fetch(
+            "SELECT DISTINCT user_id FROM user_notifications WHERE twitch_login = $1",
+            user_login,
+        )
+    except Exception as e:
+        logger.warning(f"DM subscriber fetch failed for {user_login}: {e}")
+        return
+
+    if not rows:
+        return
+
+    logger.info(f"📬 Sending DM to {len(rows)} subscriber(s) for {user_login}")
+
+    title      = (stream.get("title") if stream else None) or ""
+    game       = (stream.get("game_name") if stream else None) or "Just Chatting"
+    started_at = (stream.get("started_at") if stream else None) or ""
+    stream_url = f"https://twitch.tv/{user_login}"
+    icon_url   = user_info.get("profile_image_url") if user_info else None
+
+    ts_str = "now"
+    if started_at:
+        try:
+            dt     = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            ts_str = f"<t:{int(dt.timestamp())}:R>"
+        except Exception:
+            pass
+
+    # Build DM embed — baby pink, same style as server post
+    desc_lines = []
+    if title:
+        desc_lines.append(title)
+    desc_lines += [
+        f"👩‍💻 **Game:** {game}",
+        f"☕ **Started:** {ts_str}",
+    ]
+
+    embed = discord.Embed(
+        url=stream_url,
+        description="\n".join(desc_lines),
+        color=0xFFB6C1,  # baby pink
+    )
+
+    # Author with streamer avatar
+    embed.set_author(
+        name=user_name,
+        url=stream_url,
+        icon_url=icon_url,
+    )
+
+    # Small thumbnail in the corner (set_thumbnail = right side, not full width)
+    if icon_url:
+        embed.set_thumbnail(url=icon_url)
+
+    embed.set_footer(text="Vibes: Very Cool • /notify remove to unsubscribe")
+    embed.timestamp = discord.utils.utcnow()
+
+    # Buttons: Watch now + Unsubscribe
+    class NotifyView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+            self.add_item(discord.ui.Button(
+                label="Watch now",
+                style=discord.ButtonStyle.link,
+                url=stream_url,
+            ))
+
+    for row in rows:
+        user_id = row["user_id"]
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            if user:
+                await user.send(embed=embed, view=NotifyView())
+                logger.info(f"📬 DM sent to {user} for {user_login}")
+        except discord.Forbidden:
+            logger.debug(f"📬 Cannot DM {user_id} (DMs closed)")
+        except Exception as e:
+            logger.warning(f"📬 DM failed for {user_id}: {e}")
 
 
 # ──────────────────────────────────────────────────────────────
