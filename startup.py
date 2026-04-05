@@ -14,14 +14,14 @@ logger = logging.getLogger("startup")
 # ──────────────────────────────────────────────────────────────
 
 async def ensure_live_role(guild: discord.Guild) -> discord.Role | None:
-    role = discord.utils.get(guild.roles, name="🔴 Live")
+    role = discord.utils.get(guild.roles, name="🟢 Live")
     if role:
         return role
 
     logger.info(f"Creating Live role in {guild.name}")
     try:
         return await guild.create_role(
-            name="🔴 Live",
+            name="🟢 Live",
             color=discord.Color(0x89CFF0),
             hoist=True,
             mentionable=True,
