@@ -34,21 +34,10 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         except Exception:
             pass
 
-    # Stream title direkt, etiket yok
-    desc_lines = []
-    if title:
-        desc_lines.append(title)
-    desc_lines += [
-        f"\U0001f469\u200d\U0001f4bb **Game:** {game}",
-        f"\u2615 **Started:** {ts_str}",
-    ]
-
-    raw_thumb = stream.get("thumbnail_url", "")
-    thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
-
+    # Title as description, Game + Started as inline fields
     embed = discord.Embed(
         url=stream_url,
-        description="\n".join(desc_lines),
+        description=title if title else None,
         color=0xFFB6C1,  # baby pink
     )
 
@@ -58,6 +47,11 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         icon_url=user.get("profile_image_url"),
     )
 
+    embed.add_field(name="Game",    value=game,   inline=True)
+    embed.add_field(name="Started", value=ts_str, inline=True)
+
+    raw_thumb = stream.get("thumbnail_url", "")
+    thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
     if thumbnail:
         import time as _time
         embed.set_image(url=f"{thumbnail}?v={int(_time.time())}")
@@ -65,7 +59,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     embed.set_footer(text="Vibes: Very Cool")
     embed.timestamp = discord.utils.utcnow()
     return embed
-
 
 def build_offline_embed(
     login:        str,
@@ -349,7 +342,19 @@ class StreamMonitor:
             live_role = await ensure_live_role(guild)
             content   = live_role.mention if live_role else None
 
-            msg = await channel.send(content=content, embed=embed)
+            # Watch button — opens stream directly
+            class WatchView(discord.ui.View):
+                def __init__(self, url: str, streamer: str):
+                    super().__init__(timeout=None)
+                    self.add_item(discord.ui.Button(
+                        label=f"Watch {streamer}",
+                        style=discord.ButtonStyle.link,
+                        url=url,
+                    ))
+
+            stream_url = f"https://www.twitch.tv/{login}"
+            view = WatchView(stream_url, name if (name := stream.get("user_name") or login) else login)
+            msg = await channel.send(content=content, embed=embed, view=view)
 
             self._state[state_key] = {
                 "live":       True,
