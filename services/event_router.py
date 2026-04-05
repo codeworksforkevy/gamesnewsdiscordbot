@@ -67,6 +67,7 @@ def _build_live_embed(
         except Exception:
             pass
 
+    # Title as description, Game + Started as inline fields (like Sapphire)
     embed = discord.Embed(
         url=stream_url,
         description=title if title else None,
@@ -260,7 +261,9 @@ async def handle_stream_online(bot, event: dict) -> None:
             live_role = discord.utils.get(guild.roles, name="🟢 Live")
             content   = live_role.mention if live_role else None
 
-            # Watch button below the embed
+            # Watch button — stream_url derived from user_login (always available)
+            _stream_url = f"https://www.twitch.tv/{user_login}"
+
             class WatchView(discord.ui.View):
                 def __init__(self, url: str, name: str):
                     super().__init__(timeout=None)
@@ -270,7 +273,7 @@ async def handle_stream_online(bot, event: dict) -> None:
                         url=url,
                     ))
 
-            view = WatchView(stream_url, user_name)
+            view = WatchView(_stream_url, user_name)
             msg = await channel.send(content=content, embed=embed, view=view)
             await redis_client.set(_msg_key(user_login, guild.id), str(msg.id), ttl=LIVE_TTL)
             logger.info(f"✅ Posted live notification for {user_login} in {guild.name} → #{channel}")
@@ -304,7 +307,7 @@ async def _notify_dm_subscribers(
     if not rows:
         return
 
-    logger.info(f"🧑‍💻 Sending DM to {len(rows)} subscriber(s) for {user_login}")
+    logger.info(f"📬 Sending DM to {len(rows)} subscriber(s) for {user_login}")
 
     title      = (stream.get("title") if stream else None) or ""
     game       = (stream.get("game_name") if stream else None) or "Just Chatting"
