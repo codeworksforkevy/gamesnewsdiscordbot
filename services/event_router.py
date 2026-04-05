@@ -67,29 +67,17 @@ def _build_live_embed(
         except Exception:
             pass
 
-    # Build description: stream title then game + started
-    desc_lines = []
-    if title:
-        desc_lines.append(title)
-    desc_lines += [
-        f"Game: {game}",
-        f"Started: {ts_str}",
-    ]
-    if show_viewers and stream and stream.get("viewer_count"):
-        desc_lines.append(f"Viewers: {stream['viewer_count']:,}")
-
     embed = discord.Embed(
         url=stream_url,
-        description="\n".join(desc_lines),
+        description=title if title else None,
         color=0xFFB6C1,  # baby pink
     )
 
     icon_url = user_info.get("profile_image_url") if user_info else None
-    embed.set_author(
-        name=f"{user_name} is live on Twitch!",
-        url=stream_url,
-        icon_url=icon_url,
-    )
+    embed.set_author(name=user_name, url=stream_url, icon_url=icon_url)
+
+    embed.add_field(name="Game",    value=game,   inline=True)
+    embed.add_field(name="Started", value=ts_str, inline=True)
 
     raw_thumb = stream.get("thumbnail_url", "") if stream else ""
     if raw_thumb:
@@ -272,7 +260,18 @@ async def handle_stream_online(bot, event: dict) -> None:
             live_role = discord.utils.get(guild.roles, name="🟢 Live")
             content   = live_role.mention if live_role else None
 
-            msg = await channel.send(content=content, embed=embed)
+            # Watch button below the embed
+            class WatchView(discord.ui.View):
+                def __init__(self, url: str, name: str):
+                    super().__init__(timeout=None)
+                    self.add_item(discord.ui.Button(
+                        label=f"Watch {name}",
+                        style=discord.ButtonStyle.link,
+                        url=url,
+                    ))
+
+            view = WatchView(stream_url, user_name)
+            msg = await channel.send(content=content, embed=embed, view=view)
             await redis_client.set(_msg_key(user_login, guild.id), str(msg.id), ttl=LIVE_TTL)
             logger.info(f"✅ Posted live notification for {user_login} in {guild.name} → #{channel}")
 
@@ -305,7 +304,7 @@ async def _notify_dm_subscribers(
     if not rows:
         return
 
-    logger.info(f"📬 Sending DM to {len(rows)} subscriber(s) for {user_login}")
+    logger.info(f"🧑‍💻 Sending DM to {len(rows)} subscriber(s) for {user_login}")
 
     title      = (stream.get("title") if stream else None) or ""
     game       = (stream.get("game_name") if stream else None) or "Just Chatting"
