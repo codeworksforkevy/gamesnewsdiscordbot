@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 import logging
 import asyncio
+import time
 from datetime import datetime, timezone
 
 from core.event_bus import event_bus
@@ -46,6 +47,11 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         url=stream_url,
         icon_url=user.get("profile_image_url"),
     )
+    
+    # Yedek olarak profil fotoğrafını sağ üste küçük thumbnail olarak ekleyelim
+    profile_url = user.get("profile_image_url")
+    if profile_url:
+        embed.set_thumbnail(url=profile_url)
 
     embed.add_field(name="Game",    value=game,   inline=True)
     embed.add_field(name="Started", value=ts_str, inline=True)
@@ -53,8 +59,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     raw_thumb = stream.get("thumbnail_url", "")
     thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
     if thumbnail:
-        import time as _time
-        embed.set_image(url=f"{thumbnail}?v={int(_time.time())}")
+        embed.set_image(url=f"{thumbnail}?v={int(time.time())}")
 
     embed.set_footer(text="Vibes: Very Cool")
     embed.timestamp = discord.utils.utcnow()
@@ -207,12 +212,10 @@ class StreamMonitor:
     async def _poll(self):
         twitch = self.app_state.twitch_api
 
-        # ── DEBUG: confirm twitch_api is available ──────────────
         if not twitch:
             logger.error("🔴 DEBUG StreamMonitor: twitch_api is None — cannot poll")
             return
 
-        # ── STEP 1: Fetch streamers from DB ────────────────────
         try:
             rows = await self.db.fetch(
                 "SELECT DISTINCT twitch_login, twitch_user_id FROM streamers"
@@ -230,7 +233,6 @@ class StreamMonitor:
             f"🟢 DEBUG StreamMonitor: polling {len(logins)} streamers — {logins}"
         )
 
-        # ── STEP 2: Ask Twitch who is live ─────────────────────
         try:
             live_streams = await twitch.get_streams_by_logins(logins)
         except Exception as e:
@@ -242,11 +244,9 @@ class StreamMonitor:
             f"🟢 DEBUG StreamMonitor: Twitch says live → {list(live_map.keys()) or 'nobody'}"
         )
 
-        # ── STEP 3: Per-streamer state check ───────────────────
         for row in rows:
             login = row["twitch_login"].lower()
 
-            # ── STEP 4: Find guild + channel from DB ───────────
             try:
                 guild_rows = await self.db.fetch(
                     """
@@ -274,14 +274,7 @@ class StreamMonitor:
                 continue
 
             stream    = live_map.get(login)
-            is_live   = bool(stream)
             prev_state = self._state.get((guild_rows[0]["guild_id"], login), {})
-
-            logger.info(
-                f"🟢 DEBUG StreamMonitor: {login} — "
-                f"twitch_live={is_live} | prev_live={prev_state.get('live', False)} | "
-                f"guilds_with_channel={len(guild_rows)}"
-            )
 
             for guild_row in guild_rows:
                 guild_id   = guild_row["guild_id"]
@@ -300,14 +293,22 @@ class StreamMonitor:
                 if stream:
                     new_title = stream.get("title", "")
                     new_game  = stream.get("game_name", "")
+                    
                     if not prev.get("live"):
                         logger.info(
                             f"🚀 DEBUG StreamMonitor: {login} went LIVE — "
                             f"posting to channel {channel_id} in {guild.name}"
                         )
                         await self._post_live(guild, channel_id, login, stream, state_key)
+                        
                     elif prev.get("title") != new_title or prev.get("game") != new_game:
-                        change_type = "title+game" if (prev.get("title") != new_title and prev.get("game") != new_game)                             else ("title" if prev.get("title") != new_title else "game")
+                        if prev.get("title") != new_title and prev.get("game") != new_game:
+                            change_type = "title+game"
+                        elif prev.get("title") != new_title:
+                            change_type = "title"
+                        else:
+                            change_type = "game"
+                            
                         logger.info(
                             f"📡 DEBUG StreamMonitor: {login} {change_type} changed — updating"
                         )
@@ -315,9 +316,12 @@ class StreamMonitor:
                             guild, channel_id, stream, prev, state_key, change_type
                         )
                     else:
-                        logger.info(
-                            f"⚪ DEBUG StreamMonitor: {login} still live, no change"
-                        )
+                        # Eğer hiçbir şey değişmediyse ama son güncellemenin üzerinden 5 dakika (300 saniye) geçtiyse thumbnail'ı yakalamak için sessizce yenile
+                        if time.time() - prev.get("last_updated", 0) > 300:
+                            logger.info(f"🔄 DEBUG StreamMonitor: {login} hala canlı, thumbnail için sessiz yenileme yapılıyor")
+                            await self._refresh_embed(guild, channel_id, stream, prev, state_key)
+                        else:
+                            logger.info(f"⚪ DEBUG StreamMonitor: {login} still live, no change")
                 else:
                     if prev.get("live"):
                         logger.info(
@@ -342,7 +346,6 @@ class StreamMonitor:
             live_role = await ensure_live_role(guild)
             content   = live_role.mention if live_role else None
 
-            # Watch button — opens stream directly
             class WatchView(discord.ui.View):
                 def __init__(self, url: str, streamer: str):
                     super().__init__(timeout=None)
@@ -353,24 +356,23 @@ class StreamMonitor:
                     ))
 
             stream_url = f"https://www.twitch.tv/{login}"
-            view = WatchView(stream_url, name if (name := stream.get("user_name") or login) else login)
+            view = WatchView(stream_url, stream.get("user_name") or login)
             msg = await channel.send(content=content, embed=embed, view=view)
 
             self._state[state_key] = {
-                "live":       True,
-                "message_id": msg.id,
-                "channel_id": channel_id,
-                "title":      stream.get("title", ""),
-                "game":       stream.get("game_name", ""),
-                "started_at": stream.get("started_at", ""),
+                "live":         True,
+                "message_id":   msg.id,
+                "channel_id":   channel_id,
+                "title":        stream.get("title", ""),
+                "game":         stream.get("game_name", ""),
+                "started_at":   stream.get("started_at", ""),
+                "last_updated": time.time(),
             }
 
             logger.info(f"{login} went live in {guild.name}")
             await assign_live_role(guild, login)
 
-            # Record stream start in history
             try:
-                from datetime import datetime, timezone
                 await self.db.execute(
                     """
                     INSERT INTO stream_history (twitch_login, guild_id, title, game_name, started_at, peak_viewers)
@@ -382,13 +384,12 @@ class StreamMonitor:
                     stream.get("viewer_count", 0),
                 )
             except Exception:
-                pass  # non-critical
+                pass  
 
         except Exception as e:
             logger.error(f"post_live failed for {login} in {guild.name}: {e}")
 
     async def _update_stream(self, guild, channel_id, stream, prev, state_key, change_type):
-        """Called when title or game changes mid-stream. Edits embed + posts change notice."""
         login     = stream.get("user_login", "")
         new_title = stream.get("title", "")
         new_game  = stream.get("game_name", "")
@@ -397,7 +398,6 @@ class StreamMonitor:
             if not channel:
                 return
 
-            # Edit the live embed silently
             if prev.get("message_id"):
                 try:
                     user_info = await self._get_user(login)
@@ -406,7 +406,6 @@ class StreamMonitor:
                 except discord.NotFound:
                     self._state.pop(state_key, None)
 
-            # Post a small update notice
             lines = []
             if change_type in ("title", "title+game"):
                 lines.append(f"📝 **Title:** ~~{prev.get('title', '?')}~~ → **{new_title}**")
@@ -423,23 +422,40 @@ class StreamMonitor:
             update_embed.timestamp = discord.utils.utcnow()
             await channel.send(embed=update_embed)
 
-            # Update state
             self._state[state_key]["title"] = new_title
             self._state[state_key]["game"]  = new_game
+            self._state[state_key]["last_updated"] = time.time()
             logger.info(f"📡 {login} stream updated ({change_type}) in {guild.name}")
 
         except Exception as e:
             logger.error(f"_update_stream failed for {login} in {guild.name}: {e}")
 
+    async def _refresh_embed(self, guild, channel_id, stream, prev, state_key):
+        """ Thumbnail gecikmesini telafi etmek için mesajı sessizce günceller. """
+        login = stream.get("user_login", "")
+        try:
+            channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+            if not channel:
+                return
+
+            if prev.get("message_id"):
+                user_info = await self._get_user(login)
+                msg = await channel.fetch_message(prev["message_id"])
+                await msg.edit(embed=build_live_embed(stream, user_info))
+                self._state[state_key]["last_updated"] = time.time()
+                logger.info(f"🔄 DEBUG StreamMonitor: {login} embed sessizce yenilendi (Thumbnail kontrolü)")
+        except discord.NotFound:
+            self._state.pop(state_key, None)
+        except Exception as e:
+            logger.error(f"_refresh_embed failed for {login} in {guild.name}: {e}")
+
     async def _update_title(self, guild, channel_id, stream, prev, state_key, new_title):
-        """Backward-compat wrapper."""
         await self._update_stream(guild, channel_id, stream, prev, state_key, "title")
 
     async def _post_offline(self, guild, channel_id, login, prev, state_key):
         try:
             channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
 
-            # Build rich offline embed
             stream_info = {
                 "title":     prev.get("title", ""),
                 "game_name": prev.get("game", ""),
@@ -492,7 +508,7 @@ class StreamMonitor:
 
             if channel and prev.get("message_id"):
                 try:
-                    msg = await channel.fetch_message(prev["message_id"])
+                    msg = await channel.fetch_message(prev.get("message_id"))
                     await msg.edit(embed=offline_embed)
                 except discord.NotFound:
                     if channel:
@@ -503,9 +519,7 @@ class StreamMonitor:
             self._state[state_key] = {"live": False}
             logger.info(f"{login} went offline in {guild.name}")
 
-            # Update stream history with end time and duration
             try:
-                from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
                 started_at = prev.get("started_at")
                 duration = 0
@@ -523,7 +537,7 @@ class StreamMonitor:
                     now, duration, login, guild.id,
                 )
             except Exception:
-                pass  # non-critical
+                pass  
 
         except Exception as e:
             logger.error(f"post_offline failed for {login} in {guild.name}: {e}")
@@ -568,7 +582,6 @@ async def register(bot, app_state, session):
         description="Manage Twitch live stream tracking",
     )
 
-    # ── /live add ──────────────────────────────────────────────────────────
     @group.command(name="add", description="Track a Twitch streamer's live streams")
     @app_commands.describe(twitch_login="Twitch username to track (e.g. pokimane)")
     async def add_streamer(interaction: discord.Interaction, twitch_login: str):
@@ -635,7 +648,6 @@ async def register(bot, app_state, session):
                 stream = live_streams[0]
                 channel_id = await _get_announce_channel_id(db, interaction.guild_id)
                 if channel_id and monitor:
-                    # Post via StreamMonitor (updates internal state too)
                     state_key = (interaction.guild_id, twitch_login)
                     await monitor._post_live(
                         interaction.guild,
@@ -645,7 +657,6 @@ async def register(bot, app_state, session):
                         state_key,
                     )
                 elif not channel_id:
-                    # No announce channel set — notify the admin in the command response
                     await interaction.followup.send(
                         f"⚠️ **{display_name}** is live right now but no announce channel is set.\n"
                         f"Use `/live set-channel` to configure one, then I'll post notifications automatically.",
@@ -656,7 +667,6 @@ async def register(bot, app_state, session):
             logger.exception("add_streamer failed")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-    # ── /live remove ───────────────────────────────────────────────────────
     @group.command(name="remove", description="Stop tracking a Twitch streamer")
     @app_commands.describe(twitch_login="Twitch username to stop tracking")
     async def remove_streamer(interaction: discord.Interaction, twitch_login: str):
@@ -690,7 +700,6 @@ async def register(bot, app_state, session):
             logger.exception("remove_streamer failed")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-    # ── /live list ─────────────────────────────────────────────────────────
     @group.command(name="list", description="List all tracked streamers in this server")
     async def list_streamers(interaction: discord.Interaction):
 
@@ -729,7 +738,6 @@ async def register(bot, app_state, session):
             logger.exception("list_streamers failed")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-    # ── /live set-channel ──────────────────────────────────────────────────
     @group.command(
         name="set-channel",
         description="Set the channel where live notifications are posted (admin only)",
@@ -778,7 +786,6 @@ async def register(bot, app_state, session):
                 ephemeral=True,
             )
 
-    # ── /live set-games-channel ────────────────────────────────────────────
     @group.command(
         name="set-games-channel",
         description="Set the channel for free game and deals posts (admin only)",
@@ -830,7 +837,6 @@ async def register(bot, app_state, session):
                 ephemeral=True,
             )
 
-    # ── /live stats ────────────────────────────────────────────────────────
     @group.command(name="stats", description="📊 Detailed stream stats for tracked streamers")
     async def live_stats(interaction: discord.Interaction):
 
@@ -878,7 +884,6 @@ async def register(bot, app_state, session):
                     "📭 No streamers tracked yet. Use `/live add` to add one!",
                 )
 
-            # Who is live right now
             monitor  = getattr(app_state, "stream_monitor", None)
             live_now = set()
             if monitor and hasattr(monitor, "_state"):
@@ -912,7 +917,7 @@ async def register(bot, app_state, session):
                     last_str = "Never"
                     if last_seen:
                         try:
-                            dt = last_seen if not isinstance(last_seen, str)                                 else datetime.fromisoformat(last_seen)
+                            dt = last_seen if not isinstance(last_seen, str) else datetime.fromisoformat(last_seen)
                             last_str = f"<t:{int(dt.timestamp())}:R>"
                         except Exception:
                             pass
@@ -948,6 +953,5 @@ async def register(bot, app_state, session):
             logger.exception("live_stats failed")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-    # ── Register group ─────────────────────────────────────────────────────
     bot.tree.add_command(group)
     logger.info("live_commands registered")
