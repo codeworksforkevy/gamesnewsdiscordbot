@@ -35,11 +35,10 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         except Exception:
             pass
 
-    # Title as description, Game + Started as inline fields
     embed = discord.Embed(
         url=stream_url,
         description=title if title else None,
-        color=0xFFB6C1,  # baby pink
+        color=0xFFB6C1,
     )
 
     embed.set_author(
@@ -48,7 +47,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
         icon_url=user.get("profile_image_url"),
     )
     
-    # Yedek olarak profil fotoğrafını sağ üste küçük thumbnail olarak ekleyelim
     profile_url = user.get("profile_image_url")
     if profile_url:
         embed.set_thumbnail(url=profile_url)
@@ -107,67 +105,115 @@ def build_offline_embed(
 # LIVE ROLE HELPERS
 # ==================================================
 
-async def ensure_live_role(guild: discord.Guild) -> discord.Role | None:
-    role = discord.utils.get(guild.roles, name="🟢 Live")
+async def ensure_role(guild: discord.Guild, name: str, color: discord.Color) -> discord.Role | None:
+    """Belirtilen isim ve renkte rolü bulur, yoksa oluşturur."""
+    role = discord.utils.get(guild.roles, name=name)
     if role:
         return role
     try:
         role = await guild.create_role(
-            name="🟢 Live",
-            color=discord.Color.green(),
+            name=name,
+            color=color,
             mentionable=True,
-            reason="Auto-created by Find a Curie bot",
+            reason="Auto-created status role"
         )
-        logger.info(f"Created Live role in {guild.name}")
+        logger.info(f"Created {name} role in {guild.name}")
         return role
     except discord.Forbidden:
-        logger.warning(f"No permission to create Live role in {guild.name}")
+        logger.warning(f"No permission to create {name} role in {guild.name}")
         return None
     except Exception as e:
-        logger.error(f"Live role creation error in {guild.name}: {e}")
+        logger.error(f"Role creation error in {guild.name}: {e}")
         return None
 
+async def assign_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
+    """Yayın başladığında: Yeşili ekle, Kırmızıyı çıkar."""
+    live_role = await ensure_role(guild, "🟢 Live", discord.Color.green())
+    offline_role = await ensure_role(guild, "🔴 Offline", discord.Color.red())
+    
+    if not live_role: return
 
-async def assign_live_role(guild: discord.Guild, twitch_login: str) -> None:
-    role = await ensure_live_role(guild)
-    if not role:
-        return
-    login_lower = twitch_login.lower()
-    for member in guild.members:
-        checks = [
-            member.name.lower(),
-            (member.nick or "").lower(),
-            (member.global_name or "").lower(),
-        ]
-        if login_lower in checks and role not in member.roles:
-            try:
-                await member.add_roles(role, reason="Streamer went live")
-                logger.info(f"Assigned Live role to {member} in {guild.name}")
-            except discord.Forbidden:
-                logger.warning(f"No permission to assign role to {member}")
-            except Exception as e:
-                logger.error(f"Role assign error for {member}: {e}")
+    # 1. Önce Veritabanından (SQL) kesin eşleşmeyi ara
+    target_member = None
+    try:
+        row = await db.fetchrow(
+            "SELECT discord_user_id FROM streamers WHERE twitch_login = $1 AND guild_id = $2",
+            twitch_login.lower(), guild.id
+        )
+        if row and row["discord_user_id"]:
+            target_member = guild.get_member(row["discord_user_id"])
+    except Exception as e:
+        logger.error(f"DB check failed in assign_live_role: {e}")
+
+    # 2. Eğer DB'de eşleşme yoksa (veya üye sunucudan çıktıysa), isim arama taktiğine dön (Fallback)
+    if not target_member:
+        login_lower = twitch_login.lower()
+        for member in guild.members:
+            checks = [
+                member.name.lower(),
+                (member.nick or "").lower(),
+                (member.global_name or "").lower(),
+            ]
+            if login_lower in checks:
+                target_member = member
+                break
+
+    # 3. Üye bulunduysa rolleri ayarla
+    if target_member:
+        try:
+            if live_role not in target_member.roles:
+                await target_member.add_roles(live_role, reason="Streamer went live")
+            if offline_role and offline_role in target_member.roles:
+                await target_member.remove_roles(offline_role, reason="Streamer went live")
+            logger.info(f"Set status to LIVE for {target_member} in {guild.name}")
+        except discord.Forbidden:
+            logger.warning(f"No permission to assign roles to {target_member}")
+        except Exception as e:
+            logger.error(f"Role assign error for {target_member}: {e}")
 
 
-async def remove_live_role(guild: discord.Guild, twitch_login: str) -> None:
-    role = discord.utils.get(guild.roles, name="🟢 Live")
-    if not role:
-        return
-    login_lower = twitch_login.lower()
-    for member in guild.members:
-        checks = [
-            member.name.lower(),
-            (member.nick or "").lower(),
-            (member.global_name or "").lower(),
-        ]
-        if login_lower in checks and role in member.roles:
-            try:
-                await member.remove_roles(role, reason="Stream ended")
-                logger.info(f"Removed Live role from {member} in {guild.name}")
-            except discord.Forbidden:
-                logger.warning(f"No permission to remove role from {member}")
-            except Exception as e:
-                logger.error(f"Role remove error for {member}: {e}")
+async def remove_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
+    """Yayın bittiğinde: Yeşili çıkar, Kırmızıyı ekle."""
+    live_role = discord.utils.get(guild.roles, name="🟢 Live")
+    offline_role = await ensure_role(guild, "🔴 Offline", discord.Color.red())
+    
+    # 1. Önce Veritabanından (SQL) kesin eşleşmeyi ara
+    target_member = None
+    try:
+        row = await db.fetchrow(
+            "SELECT discord_user_id FROM streamers WHERE twitch_login = $1 AND guild_id = $2",
+            twitch_login.lower(), guild.id
+        )
+        if row and row["discord_user_id"]:
+            target_member = guild.get_member(row["discord_user_id"])
+    except Exception as e:
+        logger.error(f"DB check failed in remove_live_role: {e}")
+
+    # 2. DB'de eşleşme yoksa Fallback isim araması
+    if not target_member:
+        login_lower = twitch_login.lower()
+        for member in guild.members:
+            checks = [
+                member.name.lower(),
+                (member.nick or "").lower(),
+                (member.global_name or "").lower(),
+            ]
+            if login_lower in checks:
+                target_member = member
+                break
+
+    # 3. Üye bulunduysa rolleri ayarla
+    if target_member:
+        try:
+            if live_role and live_role in target_member.roles:
+                await target_member.remove_roles(live_role, reason="Stream ended")
+            if offline_role and offline_role not in target_member.roles:
+                await target_member.add_roles(offline_role, reason="Stream ended")
+            logger.info(f"Set status to OFFLINE for {target_member} in {guild.name}")
+        except discord.Forbidden:
+            logger.warning(f"No permission to remove roles from {target_member}")
+        except Exception as e:
+            logger.error(f"Role remove error for {target_member}: {e}")
 
 
 # ==================================================
@@ -268,8 +314,7 @@ class StreamMonitor:
 
             if not guild_rows:
                 logger.warning(
-                    f"🟡 DEBUG StreamMonitor: {login} — no guild+channel found. "
-                    f"guild_configs/guild_settings may be missing announce_channel_id"
+                    f"🟡 DEBUG StreamMonitor: {login} — no guild+channel found."
                 )
                 continue
 
@@ -284,10 +329,6 @@ class StreamMonitor:
                 guild      = self.bot.get_guild(guild_id)
 
                 if not guild:
-                    logger.warning(
-                        f"🟡 DEBUG StreamMonitor: guild {guild_id} not in bot cache — "
-                        f"bot may not be in this guild"
-                    )
                     continue
 
                 if stream:
@@ -316,7 +357,6 @@ class StreamMonitor:
                             guild, channel_id, stream, prev, state_key, change_type
                         )
                     else:
-                        # Eğer hiçbir şey değişmediyse ama son güncellemenin üzerinden 5 dakika (300 saniye) geçtiyse thumbnail'ı yakalamak için sessizce yenile
                         if time.time() - prev.get("last_updated", 0) > 300:
                             logger.info(f"🔄 DEBUG StreamMonitor: {login} hala canlı, thumbnail için sessiz yenileme yapılıyor")
                             await self._refresh_embed(guild, channel_id, stream, prev, state_key)
@@ -343,7 +383,7 @@ class StreamMonitor:
 
             user_info = await self._get_user(login)
             embed     = build_live_embed(stream, user_info)
-            live_role = await ensure_live_role(guild)
+            live_role = await ensure_role(guild, "🟢 Live", discord.Color.green())
             content   = live_role.mention if live_role else None
 
             class WatchView(discord.ui.View):
@@ -359,6 +399,27 @@ class StreamMonitor:
             view = WatchView(stream_url, stream.get("user_name") or login)
             msg = await channel.send(content=content, embed=embed, view=view)
 
+            # === YENİ EKLENEN DM KODU BURADA ===
+            try:
+                notif_users = await self.db.fetch(
+                    "SELECT user_id FROM user_notifications WHERE twitch_login = $1 AND guild_id = $2",
+                    login, guild.id
+                )
+                for row in notif_users:
+                    member = guild.get_member(row["user_id"])
+                    if member:
+                        try:
+                            await member.send(
+                                content=f"🔔 Hey! **{login}** şu an yayında!", 
+                                embed=embed, 
+                                view=view
+                            )
+                        except discord.Forbidden:
+                            logger.warning(f"DM kapalı: {member.name}")
+            except Exception as e:
+                logger.error(f"{login} için DM gönderilirken hata oluştu: {e}")
+            # ==================================
+
             self._state[state_key] = {
                 "live":         True,
                 "message_id":   msg.id,
@@ -370,7 +431,7 @@ class StreamMonitor:
             }
 
             logger.info(f"{login} went live in {guild.name}")
-            await assign_live_role(guild, login)
+            await assign_live_role(guild, login, self.db)
 
             try:
                 await self.db.execute(
@@ -431,7 +492,6 @@ class StreamMonitor:
             logger.error(f"_update_stream failed for {login} in {guild.name}: {e}")
 
     async def _refresh_embed(self, guild, channel_id, stream, prev, state_key):
-        """ Thumbnail gecikmesini telafi etmek için mesajı sessizce günceller. """
         login = stream.get("user_login", "")
         try:
             channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
@@ -448,9 +508,6 @@ class StreamMonitor:
             self._state.pop(state_key, None)
         except Exception as e:
             logger.error(f"_refresh_embed failed for {login} in {guild.name}: {e}")
-
-    async def _update_title(self, guild, channel_id, stream, prev, state_key, new_title):
-        await self._update_stream(guild, channel_id, stream, prev, state_key, "title")
 
     async def _post_offline(self, guild, channel_id, login, prev, state_key):
         try:
@@ -541,7 +598,8 @@ class StreamMonitor:
 
         except Exception as e:
             logger.error(f"post_offline failed for {login} in {guild.name}: {e}")
-        await remove_live_role(guild, login)
+            
+        await remove_live_role(guild, login, self.db)
 
 
 # ==================================================
@@ -581,6 +639,50 @@ async def register(bot, app_state, session):
         name="live",
         description="Manage Twitch live stream tracking",
     )
+
+    # === YENİ EKLENEN LINK KOMUTU ===
+    @group.command(name="link", description="Twitch yayıncısını bir Discord üyesiyle eşleştirir")
+    @app_commands.describe(
+        twitch_login="Track listesindeki Twitch nicki",
+        member="Eşleştirilecek Discord üyesi"
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def link_streamer(
+        interaction: discord.Interaction, 
+        twitch_login: str, 
+        member: discord.Member
+    ):
+        await interaction.response.defer(ephemeral=True)
+        login = twitch_login.strip().lower()
+
+        try:
+            existing = await db.fetchrow(
+                "SELECT 1 FROM streamers WHERE twitch_login = $1 AND guild_id = $2",
+                login, interaction.guild_id
+            )
+            
+            if not existing:
+                return await interaction.followup.send(
+                    f"❌ **{login}** bu sunucuda takip edilmiyor. Önce `/live add {login}` yapmalısın."
+                )
+
+            await db.execute(
+                """
+                UPDATE streamers 
+                SET discord_user_id = $1 
+                WHERE twitch_login = $2 AND guild_id = $3
+                """,
+                member.id, login, interaction.guild_id
+            )
+
+            await interaction.followup.send(
+                f"✅ Başarılı! Artık Twitch'teki **{login}** yayına girdiğinde, Discord'daki {member.mention} kullanıcısına Live rolü verilecek."
+            )
+
+        except Exception as e:
+            logger.error(f"/live link hatası: {e}")
+            await interaction.followup.send("❌ Veritabanı hatası oluştu.")
+    # ===============================
 
     @group.command(name="add", description="Track a Twitch streamer's live streams")
     @app_commands.describe(twitch_login="Twitch username to track (e.g. pokimane)")
