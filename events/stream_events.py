@@ -2,8 +2,8 @@
 events/stream_events.py
 ────────────────────────────────────────────────────────────────
 Handles all Twitch EventSub events (online, offline, channel.update).
-Merges community routing rules (KevKevvy's specific channel) and 
-API delay fallbacks into a single source of truth to avoid race conditions.
+Merges community routing rules, API delay fallbacks, and PostgreSQL 
+database synchronization into a single, cohesive source of truth.
 """
 
 import asyncio
@@ -15,6 +15,7 @@ from typing import Optional
 import discord
 
 from db.guild_settings import get_guild_config
+from db.streamer_queries import upsert_streamer, set_stream_offline
 from services.redis_client import redis_client
 from services.twitch_cache import get_cached_stream
 from utils.stream_diff import detect_changes
@@ -57,12 +58,10 @@ def _get_target_channel(guild: discord.Guild, config: dict, login: str) -> Optio
     Routes the notification to the correct channel based on the streamer.
     """
     if login == KEVKEVVY_LOGIN:
-        # Kevy's stream goes to his personal channel
         ch = guild.get_channel(KEVKEVVY_CHANNEL_ID)
         if ch:
             return ch
             
-    # Default fallback for friends/other streamers
     ch_id = config.get("announce_channel_id")
     if ch_id:
         return guild.get_channel(ch_id)
@@ -89,7 +88,7 @@ def _live_embed(login: str, stream: dict) -> discord.Embed:
     ts_str = "now"
     if started_at:
         try:
-            from datetime import datetime, timezone as _tz
+            from datetime import datetime
             dt     = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
             ts_str = f"<t:{int(dt.timestamp())}:R>"
         except Exception:
@@ -198,9 +197,9 @@ async def _send_or_edit(
 # ──────────────────────────────────────────────────────────────
 
 async def handle_stream_online(bot, event: dict) -> None:
-
-    login      = event["broadcaster_user_login"].lower()
-    user_name  = event.get("broadcaster_user_name", login)
+    broadcaster_id = event.get("broadcaster_user_id")
+    login          = event["broadcaster_user_login"].lower()
+    user_name      = event.get("broadcaster_user_name", login)
 
     logger.info("stream.online received", extra={"extra_data": {"login": login}})
 
@@ -249,7 +248,7 @@ async def handle_stream_online(bot, event: dict) -> None:
     else:
         embed = _live_embed(login, new_stream)
 
-    # ── Notify Guilds ───────────────────────────────────────────
+    # ── Notify Guilds & Sync DB ─────────────────────────────────
     for guild in bot.guilds:
         config = await get_guild_config(guild.id)
         if not config:
@@ -259,6 +258,17 @@ async def handle_stream_online(bot, event: dict) -> None:
         if not channel:
             continue
 
+        # PostgreSQL tablosunu canlı durumuna güncelle (/live ve istatistikler için)
+        if broadcaster_id:
+            try:
+                await upsert_streamer(
+                    broadcaster_id=broadcaster_id,
+                    twitch_login=login,
+                    guild_id=guild.id
+                )
+            except Exception as e:
+                logger.error(f"PostgreSQL upsert failed for {login} in guild {guild.id}: {e}")
+
         content: Optional[str] = None
         if config.get("enable_ping") and config.get("ping_role_id"):
             role = guild.get_role(config["ping_role_id"])
@@ -267,7 +277,7 @@ async def handle_stream_online(bot, event: dict) -> None:
 
         await _send_or_edit(channel, login, guild.id, content, embed)
 
-    logger.info("stream.online notifications dispatched")
+    logger.info("stream.online notifications and database sync dispatched")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -275,12 +285,19 @@ async def handle_stream_online(bot, event: dict) -> None:
 # ──────────────────────────────────────────────────────────────
 
 async def handle_stream_offline(bot, event: dict) -> None:
-
-    login = event["broadcaster_user_login"].lower()
+    broadcaster_id = event.get("broadcaster_user_id")
+    login          = event["broadcaster_user_login"].lower()
     logger.info("stream.offline received", extra={"extra_data": {"login": login}})
 
     start_raw  = await redis_client.get(_start_key(login))
     start_ts   = float(start_raw) if start_raw else None
+
+    # PostgreSQL tablosunda yayıncıyı offline çek
+    if broadcaster_id:
+        try:
+            await set_stream_offline(broadcaster_id=broadcaster_id)
+        except Exception as e:
+            logger.error(f"PostgreSQL offline update failed for {login}: {e}")
 
     # Clean up Redis live state
     await redis_client.delete(_status_key(login), _meta_key(login), _start_key(login))
@@ -302,7 +319,7 @@ async def handle_stream_offline(bot, event: dict) -> None:
         try:
             await channel.send(embed=embed)
         except Exception as e:
-            logger.error("Failed to send offline notification")
+            logger.error(f"Failed to send offline notification in guild {guild.id}: {e}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -310,7 +327,6 @@ async def handle_stream_offline(bot, event: dict) -> None:
 # ──────────────────────────────────────────────────────────────
 
 async def handle_channel_update(bot, event: dict) -> None:
-
     login = event["broadcaster_user_login"].lower()
     
     # Yalnızca yayın açıksa güncellemeleri kontrol et
@@ -351,4 +367,4 @@ async def handle_channel_update(bot, event: dict) -> None:
         try:
             await channel.send(embed=embed)
         except Exception as e:
-            logger.error("Failed to send channel update notification")
+            logger.error(f"Failed to send channel update notification in guild {guild.id}: {e}")
