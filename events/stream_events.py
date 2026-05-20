@@ -5,42 +5,9 @@ Handles stream.online events from Twitch EventSub.
 
 Builds a rich Discord embed and posts (or edits) a notification
 in each configured guild channel.
-
-Fixes vs original:
-- Imported from services.guild_config but the canonical module is
-  db.guild_settings — unified to db.guild_settings.get_guild_config()
-- config["channel_id"] used but guild_settings returns
-  "announce_channel_id" — would KeyError on every notification.
-  Fixed to use the correct field name.
-- get_guild_config was called with (bot.app_state.db, guild.id) but
-  guild_settings uses a module-level DB singleton (set_db) and only
-  takes guild_id — fixed call signature.
-- Metadata TTL was 60 seconds — too short for a stream that might
-  change title/game. Changed to 300s to match MetadataCache default.
-- change_text was built with string concatenation inside a loop with
-  no separator logic — could produce double newlines or missing ones.
-  Replaced with a clean list-join approach.
-- No thumbnail on the embed — added cache-busted Twitch thumbnail.
-- No game / viewer count fields on the embed — added both.
-- No error handling on channel.send() — a single bad channel would
-  break notifications for all remaining guilds.
-- No deduplication: if EventSub fires twice (it can), two identical
-  posts appear. Added Redis flag guard (stream:status:{login}).
-- send() used unconditionally — now edit-or-send using stored msg ID,
-  consistent with event_router.py from the previous batch.
-- stream_offline handler was missing entirely — added.
-
-UX improvements:
-- Embed title prefixed with 🔴 to be immediately scannable in a busy
-  channel without opening the embed.
-- Viewer count shown as a field so members know how big the stream is.
-- Cache-busted thumbnail so the preview always shows the current scene.
-- Offline embed uses a muted grey colour and shows stream duration
-  if the start time was cached in Redis.
-- Change-detection embed (title/game shift mid-stream) uses a
-  distinct amber colour so it doesn't look like a new-live ping.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -229,15 +196,26 @@ async def handle_stream_online(bot, event: dict) -> None:
 
     # ── Fetch current stream metadata ───────────────────────────
     new_stream = await get_cached_stream(login)
+    
+    # EĞER TWITCH API GECİKTİYSE: 10 saniye bekleyip tekrar sor
+    if not new_stream:
+        logger.info(f"Twitch API gecikmesi tespit edildi, {login} için 10 saniye bekleniyor...")
+        await asyncio.sleep(10)
+        new_stream = await get_cached_stream(login)
+
+    # HALA VERİ YOKSA: Bildirimi iptal etme, varsayılan (fallback) verilerle at
     if not new_stream:
         logger.warning(
-            "No stream metadata available — skipping notification",
+            "Twitch API veriyi zamanında dönmedi — Fallback (Acil Durum) verisi kullanılıyor",
             extra={"extra_data": {"login": login}},
         )
-        return
+        new_stream = {
+            "title": f"{user_name} yayında!",
+            "game_name": "Bilinmiyor",
+            "started_at": event.get("started_at", "")
+        }
 
     # ── Detect changes vs previous cached metadata ─────────────
-    # Normalise keys: detect_changes uses "game", cache uses "game_name"
     old_raw    = await redis_client.get(_meta_key(login))
     old_stream = json.loads(old_raw) if old_raw else None
     if old_stream and "game_name" in old_stream:
@@ -263,7 +241,6 @@ async def handle_stream_online(bot, event: dict) -> None:
         if not config:
             continue
 
-        # Fixed: field is announce_channel_id, not channel_id
         channel = guild.get_channel(config.get("announce_channel_id"))
         if not channel:
             logger.warning(
@@ -334,3 +311,63 @@ async def handle_stream_offline(bot, event: dict) -> None:
         "stream.offline notifications dispatched",
         extra={"extra_data": {"login": login}},
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# CHANNEL UPDATE (MID-STREAM CHANGES)
+# ──────────────────────────────────────────────────────────────
+
+async def handle_channel_update(bot, event: dict) -> None:
+
+    login = event["broadcaster_user_login"].lower()
+    logger.info("channel.update received", extra={"extra_data": {"login": login}})
+
+    # Yalnızca yayın açıksa güncellemeleri discord'a at
+    already_live = await redis_client.get(_status_key(login))
+    if already_live != "live":
+        return
+
+    # Güncel veriyi çek
+    new_stream = await get_cached_stream(login)
+    if not new_stream:
+        return
+
+    # Eski veri ile karşılaştır
+    old_raw = await redis_client.get(_meta_key(login))
+    old_stream = json.loads(old_raw) if old_raw else None
+
+    if old_stream and "game_name" in old_stream:
+        old_stream["game"] = old_stream.pop("game_name")
+    new_norm = dict(new_stream)
+    if "game_name" in new_norm:
+        new_norm["game"] = new_norm.pop("game_name")
+
+    changes = detect_changes(old_stream, new_norm) if old_stream else {}
+
+    # Herhangi bir değişim yoksa iptal et
+    if not changes:
+        return
+
+    # Cache'i güncelle
+    await redis_client.set(_meta_key(login), json.dumps(new_stream), ttl=META_TTL)
+
+    # Sarı (Amber) renkli embed'i oluştur
+    embed = _change_embed(login, new_stream, changes)
+
+    # Sunuculara gönder (Update mesajları direkt yeni mesaj olarak atılır)
+    for guild in bot.guilds:
+        config = await get_guild_config(guild.id)
+        if not config:
+            continue
+
+        channel = guild.get_channel(config.get("announce_channel_id"))
+        if not channel:
+            continue
+
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            logger.error(
+                "Failed to send channel update notification",
+                extra={"extra_data": {"guild_id": guild.id, "error": str(e)}},
+            )
