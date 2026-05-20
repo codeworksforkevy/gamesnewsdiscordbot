@@ -1,10 +1,9 @@
 """
 events/stream_events.py
 ────────────────────────────────────────────────────────────────
-Handles stream.online events from Twitch EventSub.
-
-Builds a rich Discord embed and posts (or edits) a notification
-in each configured guild channel.
+Handles all Twitch EventSub events (online, offline, channel.update).
+Merges community routing rules (KevKevvy's specific channel) and 
+API delay fallbacks into a single source of truth to avoid race conditions.
 """
 
 import asyncio
@@ -23,6 +22,17 @@ from utils.stream_diff import detect_changes
 logger = logging.getLogger("stream-events")
 
 # ──────────────────────────────────────────────────────────────
+# CONSTANTS & ROUTING RULES
+# ──────────────────────────────────────────────────────────────
+
+LIVE_TTL  = 60 * 60 * 6    # 6 hours — covers long streams
+META_TTL  = 300             # 5 minutes for stream metadata
+
+# Kevy is male, this stream goes to his dedicated channel
+KEVKEVVY_LOGIN      = "kevkevvy"
+KEVKEVVY_CHANNEL_ID = 1446562544612540645
+
+# ──────────────────────────────────────────────────────────────
 # REDIS KEY HELPERS
 # ──────────────────────────────────────────────────────────────
 
@@ -38,9 +48,26 @@ def _msg_key(login: str, guild_id: int) -> str:
 def _start_key(login: str) -> str:
     return f"stream:start:{login}"
 
-LIVE_TTL  = 60 * 60 * 6    # 6 hours — covers long streams
-META_TTL  = 300             # 5 minutes for stream metadata
+# ──────────────────────────────────────────────────────────────
+# CHANNEL ROUTER
+# ──────────────────────────────────────────────────────────────
 
+def _get_target_channel(guild: discord.Guild, config: dict, login: str) -> Optional[discord.TextChannel]:
+    """
+    Routes the notification to the correct channel based on the streamer.
+    """
+    if login == KEVKEVVY_LOGIN:
+        # Kevy's stream goes to his personal channel
+        ch = guild.get_channel(KEVKEVVY_CHANNEL_ID)
+        if ch:
+            return ch
+            
+    # Default fallback for friends/other streamers
+    ch_id = config.get("announce_channel_id")
+    if ch_id:
+        return guild.get_channel(ch_id)
+        
+    return None
 
 # ──────────────────────────────────────────────────────────────
 # EMBED BUILDERS
@@ -68,7 +95,6 @@ def _live_embed(login: str, stream: dict) -> discord.Embed:
         except Exception:
             pass
 
-    # Title direkt, etiket yok — viewer yok
     desc_lines = []
     if title:
         desc_lines.append(title)
@@ -91,10 +117,7 @@ def _live_embed(login: str, stream: dict) -> discord.Embed:
 
 
 def _change_embed(login: str, stream: dict, changes: dict) -> discord.Embed:
-    """
-    Amber-coloured embed shown when title or game changes mid-stream.
-    Distinct from the initial live embed so members aren't confused.
-    """
+    """Amber-coloured embed shown when title or game changes mid-stream."""
     lines: list[str] = []
 
     if "title" in changes:
@@ -111,7 +134,7 @@ def _change_embed(login: str, stream: dict, changes: dict) -> discord.Embed:
         title="📡  Stream Updated",
         url=f"https://twitch.tv/{login}",
         description="\n\n".join(lines),
-        color=0xF5A623,   # Amber — visually distinct from live/offline
+        color=0xF5A623,   # Amber
     )
 
     embed.set_footer(text=f"twitch.tv/{login}")
@@ -146,10 +169,6 @@ async def _send_or_edit(
     content: Optional[str],
     embed: discord.Embed,
 ) -> None:
-    """
-    Edits the existing notification message if one was sent before,
-    otherwise sends a fresh one and stores the message ID.
-    """
     msg_key    = _msg_key(login, guild_id)
     stored_raw = await redis_client.get(msg_key)
 
@@ -185,7 +204,7 @@ async def handle_stream_online(bot, event: dict) -> None:
 
     logger.info("stream.online received", extra={"extra_data": {"login": login}})
 
-    # ── Deduplication ───────────────────────────────────────────
+    # ── Deduplication Lock ──────────────────────────────────────
     already_live = await redis_client.get(_status_key(login))
     if already_live == "live":
         logger.info(f"Duplicate stream.online ignored for {login}")
@@ -194,16 +213,14 @@ async def handle_stream_online(bot, event: dict) -> None:
     await redis_client.set(_status_key(login), "live", ttl=LIVE_TTL)
     await redis_client.set(_start_key(login), str(time.time()), ttl=LIVE_TTL)
 
-    # ── Fetch current stream metadata ───────────────────────────
+    # ── Fetch current stream metadata (with Fallback) ───────────
     new_stream = await get_cached_stream(login)
     
-    # EĞER TWITCH API GECİKTİYSE: 10 saniye bekleyip tekrar sor
     if not new_stream:
         logger.info(f"Twitch API gecikmesi tespit edildi, {login} için 10 saniye bekleniyor...")
         await asyncio.sleep(10)
         new_stream = await get_cached_stream(login)
 
-    # HALA VERİ YOKSA: Bildirimi iptal etme, varsayılan (fallback) verilerle at
     if not new_stream:
         logger.warning(
             "Twitch API veriyi zamanında dönmedi — Fallback (Acil Durum) verisi kullanılıyor",
@@ -215,7 +232,7 @@ async def handle_stream_online(bot, event: dict) -> None:
             "started_at": event.get("started_at", "")
         }
 
-    # ── Detect changes vs previous cached metadata ─────────────
+    # ── Update cache and check differences ──────────────────────
     old_raw    = await redis_client.get(_meta_key(login))
     old_stream = json.loads(old_raw) if old_raw else None
     if old_stream and "game_name" in old_stream:
@@ -223,33 +240,23 @@ async def handle_stream_online(bot, event: dict) -> None:
     new_norm = dict(new_stream)
     if "game_name" in new_norm:
         new_norm["game"] = new_norm.pop("game_name")
+    
     changes = detect_changes(old_stream, new_norm) if old_stream else {}
-
-    # Update metadata cache
     await redis_client.set(_meta_key(login), json.dumps(new_stream), ttl=META_TTL)
 
-    # ── Build embed ─────────────────────────────────────────────
     if changes:
         embed = _change_embed(login, new_stream, changes)
     else:
         embed = _live_embed(login, new_stream)
 
-    # ── Notify each guild ───────────────────────────────────────
+    # ── Notify Guilds ───────────────────────────────────────────
     for guild in bot.guilds:
-
         config = await get_guild_config(guild.id)
         if not config:
             continue
 
-        channel = guild.get_channel(config.get("announce_channel_id"))
+        channel = _get_target_channel(guild, config, login)
         if not channel:
-            logger.warning(
-                "Announce channel not found",
-                extra={"extra_data": {
-                    "guild_id":   guild.id,
-                    "channel_id": config.get("announce_channel_id"),
-                }},
-            )
             continue
 
         content: Optional[str] = None
@@ -260,10 +267,7 @@ async def handle_stream_online(bot, event: dict) -> None:
 
         await _send_or_edit(channel, login, guild.id, content, embed)
 
-    logger.info(
-        "stream.online notifications dispatched",
-        extra={"extra_data": {"login": login, "guilds": len(bot.guilds)}},
-    )
+    logger.info("stream.online notifications dispatched")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -273,10 +277,8 @@ async def handle_stream_online(bot, event: dict) -> None:
 async def handle_stream_offline(bot, event: dict) -> None:
 
     login = event["broadcaster_user_login"].lower()
-
     logger.info("stream.offline received", extra={"extra_data": {"login": login}})
 
-    # Retrieve stream start time for duration display
     start_raw  = await redis_client.get(_start_key(login))
     start_ts   = float(start_raw) if start_raw else None
 
@@ -286,31 +288,21 @@ async def handle_stream_offline(bot, event: dict) -> None:
     embed = _offline_embed(login, start_ts)
 
     for guild in bot.guilds:
-
         config = await get_guild_config(guild.id)
         if not config:
             continue
 
-        channel = guild.get_channel(config.get("announce_channel_id"))
+        channel = _get_target_channel(guild, config, login)
         if not channel:
             continue
 
-        # Clean up stored live message ID — offline embed is always a new post
         msg_key = _msg_key(login, guild.id)
         await redis_client.delete(msg_key)
 
         try:
             await channel.send(embed=embed)
         except Exception as e:
-            logger.error(
-                "Failed to send offline notification",
-                extra={"extra_data": {"guild_id": guild.id, "error": str(e)}},
-            )
-
-    logger.info(
-        "stream.offline notifications dispatched",
-        extra={"extra_data": {"login": login}},
-    )
+            logger.error("Failed to send offline notification")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -320,19 +312,16 @@ async def handle_stream_offline(bot, event: dict) -> None:
 async def handle_channel_update(bot, event: dict) -> None:
 
     login = event["broadcaster_user_login"].lower()
-    logger.info("channel.update received", extra={"extra_data": {"login": login}})
-
-    # Yalnızca yayın açıksa güncellemeleri discord'a at
+    
+    # Yalnızca yayın açıksa güncellemeleri kontrol et
     already_live = await redis_client.get(_status_key(login))
     if already_live != "live":
         return
 
-    # Güncel veriyi çek
     new_stream = await get_cached_stream(login)
     if not new_stream:
         return
 
-    # Eski veri ile karşılaştır
     old_raw = await redis_client.get(_meta_key(login))
     old_stream = json.loads(old_raw) if old_raw else None
 
@@ -344,30 +333,22 @@ async def handle_channel_update(bot, event: dict) -> None:
 
     changes = detect_changes(old_stream, new_norm) if old_stream else {}
 
-    # Herhangi bir değişim yoksa iptal et
     if not changes:
         return
 
-    # Cache'i güncelle
     await redis_client.set(_meta_key(login), json.dumps(new_stream), ttl=META_TTL)
-
-    # Sarı (Amber) renkli embed'i oluştur
     embed = _change_embed(login, new_stream, changes)
 
-    # Sunuculara gönder (Update mesajları direkt yeni mesaj olarak atılır)
     for guild in bot.guilds:
         config = await get_guild_config(guild.id)
         if not config:
             continue
 
-        channel = guild.get_channel(config.get("announce_channel_id"))
+        channel = _get_target_channel(guild, config, login)
         if not channel:
             continue
 
         try:
             await channel.send(embed=embed)
         except Exception as e:
-            logger.error(
-                "Failed to send channel update notification",
-                extra={"extra_data": {"guild_id": guild.id, "error": str(e)}},
-            )
+            logger.error("Failed to send channel update notification")
