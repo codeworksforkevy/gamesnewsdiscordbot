@@ -15,7 +15,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from services.event_router import get_stream_status
+# services.event_router yerine, Redis'e doğrudan bağlanıp durumu çekiyoruz
+from services.redis_client import redis_client
+
+async def get_stream_status(login: str) -> str:
+    # Redis'teki "stream:status:{login}" key'ini kontrol et
+    status = await redis_client.get(f"stream:status:{login.lower()}")
+    return "live" if status == "live" else "offline"
 
 logger = logging.getLogger("status_command")
 
