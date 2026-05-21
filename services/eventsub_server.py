@@ -6,7 +6,7 @@ import logging
 import os
 
 from aiohttp import web
-from services.event_router import handle_stream_online, handle_stream_offline, handle_stream_update
+from events.stream_events import handle_stream_online, handle_stream_offline, handle_channel_update
 
 logger = logging.getLogger("eventsub_server")
 
