@@ -786,7 +786,7 @@ async def register(bot, app_state, session):
                     f"❌ **{twitch_login}** isn't tracked in this server.",
                 )
 
-            await event_bus.emit("streamer_removed", {
+            await event_bus.publish("streamer_removed", {
                 "twitch_login": twitch_login,
                 "guild_id":     interaction.guild_id,
             })
@@ -800,6 +800,91 @@ async def register(bot, app_state, session):
 
         except Exception:
             logger.exception("remove_streamer failed")
+            await interaction.followup.send("❌ Something went wrong. Please try again.")
+
+    @group.command(
+        name="force",
+        description="Manually trigger a live notification if Find a Curie missed it",
+    )
+    @app_commands.describe(twitch_login="Twitch username of the streamer currently live")
+    async def force_notify(interaction: discord.Interaction, twitch_login: str):
+        """
+        Kaçırılan bir canlı yayın bildirimi için manuel tetikleyici.
+        Streamer gerçekten canlıysa embed gönderir; değilse kullanıcıyı bilgilendirir.
+        """
+        await interaction.response.defer(ephemeral=True)
+        twitch_login = twitch_login.strip().lower()
+
+        try:
+            # ── 1. Takip listesinde mi? ──────────────────────────────────────
+            tracked = await db.fetchrow(
+                "SELECT twitch_user_id FROM streamers WHERE twitch_login = $1 AND guild_id = $2",
+                twitch_login, interaction.guild_id,
+            )
+            if not tracked:
+                return await interaction.followup.send(
+                    f"❌ **{twitch_login}** isn't tracked in this server.\n"
+                    f"Use `/live add {twitch_login}` first.",
+                    ephemeral=True,
+                )
+
+            # ── 2. Twitch API'den anlık durum kontrolü ───────────────────────
+            live_streams = await app_state.twitch_api.get_streams_by_logins([twitch_login])
+            if not live_streams:
+                return await interaction.followup.send(
+                    f"📴 **{twitch_login}** doesn't appear to be live right now.\n"
+                    f"Twitch API shows no active stream.",
+                    ephemeral=True,
+                )
+
+            stream    = live_streams[0]
+            state_key = (interaction.guild_id, twitch_login)
+
+            # ── 3. Zaten gönderilmiş mi? ─────────────────────────────────────
+            already_posted = monitor and monitor._state.get(state_key, {}).get("live")
+            if already_posted:
+                return await interaction.followup.send(
+                    f"ℹ️ A live notification for **{twitch_login}** was already posted "
+                    f"this session.\nIf it's missing from the channel, it may have been "
+                    f"deleted. Use `/live force {twitch_login}` again to re-post.",
+                    ephemeral=True,
+                )
+
+            # ── 4. Kanal kontrolü ────────────────────────────────────────────
+            channel_id = await _get_announce_channel_id(db, interaction.guild_id)
+            if not channel_id:
+                return await interaction.followup.send(
+                    f"⚠️ No announce channel configured.\n"
+                    f"Use `/live set-channel` first.",
+                    ephemeral=True,
+                )
+
+            # ── 5. Bildirimi gönder ──────────────────────────────────────────
+            await monitor._post_live(
+                interaction.guild,
+                channel_id,
+                twitch_login,
+                stream,
+                state_key,
+            )
+
+            game  = stream.get("game_name") or "Just Chatting"
+            title = stream.get("title") or "No title"
+
+            confirm = discord.Embed(
+                title="✅ Notification sent",
+                description=(
+                    f"Posted live notification for **{twitch_login}**.\n\n"
+                    f"🎮 **{game}**\n"
+                    f"📝 {title}"
+                ),
+                color=0x2ECC71,
+            )
+            confirm.set_footer(text="Find a Curie • manual trigger")
+            await interaction.followup.send(embed=confirm, ephemeral=True)
+
+        except Exception:
+            logger.exception(f"force_notify failed for {twitch_login}")
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
     @group.command(name="list", description="List all tracked streamers in this server")
