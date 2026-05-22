@@ -719,7 +719,7 @@ async def register(bot, app_state, session):
                 twitch_user_id, twitch_login, interaction.guild_id,
             )
 
-            await event_bus.emit("streamer_added", {
+            await event_bus.publish("streamer_added", {
                 "twitch_user_id": twitch_user_id,
                 "twitch_login":   twitch_login,
                 "guild_id":       interaction.guild_id,
