@@ -358,7 +358,7 @@ class StreamMonitor:
                         )
                     else:
                         if time.time() - prev.get("last_updated", 0) > 300:
-                        logger.info(f"🔄 DEBUG StreamMonitor: {login} still live — silently refreshing thumbnail")
+                            logger.info(f"🔄 DEBUG StreamMonitor: {login} still live — silently refreshing thumbnail")
                             await self._refresh_embed(guild, channel_id, stream, prev, state_key)
                         else:
                             logger.info(f"⚪ DEBUG StreamMonitor: {login} still live, no change")
