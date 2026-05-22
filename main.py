@@ -182,6 +182,36 @@ bot.logger    = logger
 def _setup_event_handlers() -> None:
     """Wires all event_bus subscribers before the bot connects."""
     register_notifier(bot)
+
+    # Yeni streamer eklendiğinde Twitch EventSub aboneliği otomatik oluştur
+    async def _on_streamer_added(payload: dict) -> None:
+        eventsub = getattr(app_state, "eventsub_manager", None)
+        if not eventsub:
+            logger.warning("streamer_added: EventSubManager yok — abonelik oluşturulamadı")
+            return
+
+        twitch_user_id = payload.get("twitch_user_id")
+        twitch_login   = payload.get("twitch_login", "?")
+
+        if not twitch_user_id:
+            logger.warning(f"streamer_added: twitch_user_id eksik ({twitch_login})")
+            return
+
+        callback_url = eventsub.callback_url
+        if not callback_url:
+            logger.warning(
+                f"streamer_added: callback URL yapılandırılmamış — "
+                f"{twitch_login} için abonelik oluşturulamadı"
+            )
+            return
+
+        try:
+            await eventsub.ensure_subscriptions(str(twitch_user_id), callback_url)
+            logger.info(f"EventSub abonelikleri oluşturuldu: {twitch_login}")
+        except Exception as e:
+            logger.error(f"EventSub abonelik hatası ({twitch_login}): {e}", exc_info=True)
+
+    event_bus.subscribe("streamer_added", _on_streamer_added)
     logger.info("Core event handlers registered")
 
 
