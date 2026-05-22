@@ -106,7 +106,7 @@ def build_offline_embed(
 # ==================================================
 
 async def ensure_role(guild: discord.Guild, name: str, color: discord.Color) -> discord.Role | None:
-    """Belirtilen isim ve renkte rolü bulur, yoksa oluşturur."""
+    """Find or create a role with the given name and color."""
     role = discord.utils.get(guild.roles, name=name)
     if role:
         return role
@@ -127,13 +127,13 @@ async def ensure_role(guild: discord.Guild, name: str, color: discord.Color) -> 
         return None
 
 async def assign_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
-    """Yayın başladığında: Yeşili ekle, Kırmızıyı çıkar."""
+    """Add the Live role and remove the Offline role when a stream starts."""
     live_role = await ensure_role(guild, "🟢 Live", discord.Color.green())
     offline_role = await ensure_role(guild, "🔴 Offline", discord.Color.red())
     
     if not live_role: return
 
-    # 1. Önce Veritabanından (SQL) kesin eşleşmeyi ara
+    # 1. Check DB first for an exact Discord user ID match
     target_member = None
     try:
         row = await db.fetchrow(
@@ -145,7 +145,7 @@ async def assign_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
     except Exception as e:
         logger.error(f"DB check failed in assign_live_role: {e}")
 
-    # 2. Eğer DB'de eşleşme yoksa (veya üye sunucudan çıktıysa), isim arama taktiğine dön (Fallback)
+    # 2. Fall back to name matching if no DB link or member left the server
     if not target_member:
         login_lower = twitch_login.lower()
         for member in guild.members:
@@ -158,7 +158,7 @@ async def assign_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
                 target_member = member
                 break
 
-    # 3. Üye bulunduysa rolleri ayarla
+    # 3. Apply roles if a member was found
     if target_member:
         try:
             if live_role not in target_member.roles:
@@ -173,11 +173,11 @@ async def assign_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
 
 
 async def remove_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
-    """Yayın bittiğinde: Yeşili çıkar, Kırmızıyı ekle."""
+    """Remove the Live role and add the Offline role when a stream ends."""
     live_role = discord.utils.get(guild.roles, name="🟢 Live")
     offline_role = await ensure_role(guild, "🔴 Offline", discord.Color.red())
     
-    # 1. Önce Veritabanından (SQL) kesin eşleşmeyi ara
+    # 1. Check DB first for an exact Discord user ID match
     target_member = None
     try:
         row = await db.fetchrow(
@@ -189,7 +189,7 @@ async def remove_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
     except Exception as e:
         logger.error(f"DB check failed in remove_live_role: {e}")
 
-    # 2. DB'de eşleşme yoksa Fallback isim araması
+    # 2. Fall back to name matching if no DB link
     if not target_member:
         login_lower = twitch_login.lower()
         for member in guild.members:
@@ -202,7 +202,7 @@ async def remove_live_role(guild: discord.Guild, twitch_login: str, db) -> None:
                 target_member = member
                 break
 
-    # 3. Üye bulunduysa rolleri ayarla
+    # 3. Apply roles if a member was found
     if target_member:
         try:
             if live_role and live_role in target_member.roles:
@@ -358,7 +358,7 @@ class StreamMonitor:
                         )
                     else:
                         if time.time() - prev.get("last_updated", 0) > 300:
-                            logger.info(f"🔄 DEBUG StreamMonitor: {login} hala canlı, thumbnail için sessiz yenileme yapılıyor")
+                        logger.info(f"🔄 DEBUG StreamMonitor: {login} still live — silently refreshing thumbnail")
                             await self._refresh_embed(guild, channel_id, stream, prev, state_key)
                         else:
                             logger.info(f"⚪ DEBUG StreamMonitor: {login} still live, no change")
@@ -399,7 +399,7 @@ class StreamMonitor:
             view = WatchView(stream_url, stream.get("user_name") or login)
             msg = await channel.send(content=content, embed=embed, view=view)
 
-            # === YENİ EKLENEN DM KODU BURADA ===
+            # Send DM notifications to users who opted in for this streamer
             try:
                 notif_users = await self.db.fetch(
                     "SELECT user_id FROM user_notifications WHERE twitch_login = $1 AND guild_id = $2",
@@ -410,15 +410,15 @@ class StreamMonitor:
                     if member:
                         try:
                             await member.send(
-                                content=f"🔔 Hey! **{login}** şu an yayında!", 
+                                content=f"🔔 Hey! **{login}** is live right now!", 
                                 embed=embed, 
                                 view=view
                             )
                         except discord.Forbidden:
-                            logger.warning(f"DM kapalı: {member.name}")
+                            logger.warning(f"DMs closed for: {member.name}")
             except Exception as e:
-                logger.error(f"{login} için DM gönderilirken hata oluştu: {e}")
-            # ==================================
+                logger.error(f"Failed to send DM notifications for {login}: {e}")
+            # ── end DM block ──────────────────────────────────────────────────
 
             self._state[state_key] = {
                 "live":         True,
@@ -503,7 +503,7 @@ class StreamMonitor:
                 msg = await channel.fetch_message(prev["message_id"])
                 await msg.edit(embed=build_live_embed(stream, user_info))
                 self._state[state_key]["last_updated"] = time.time()
-                logger.info(f"🔄 DEBUG StreamMonitor: {login} embed sessizce yenilendi (Thumbnail kontrolü)")
+                logger.info(f"🔄 DEBUG StreamMonitor: {login} embed refreshed silently (thumbnail check)")
         except discord.NotFound:
             self._state.pop(state_key, None)
         except Exception as e:
@@ -640,11 +640,11 @@ async def register(bot, app_state, session):
         description="Manage Twitch live stream tracking",
     )
 
-    # === YENİ EKLENEN LINK KOMUTU ===
-    @group.command(name="link", description="Twitch yayıncısını bir Discord üyesiyle eşleştirir")
+    # Link command — maps a Twitch streamer to a Discord member for role assignment
+    @group.command(name="link", description="Link a tracked Twitch streamer to a Discord member")
     @app_commands.describe(
-        twitch_login="Track listesindeki Twitch nicki",
-        member="Eşleştirilecek Discord üyesi"
+        twitch_login="Twitch username already in the tracking list",
+        member="Discord member to link this streamer to"
     )
     @app_commands.checks.has_permissions(manage_guild=True)
     async def link_streamer(
@@ -663,7 +663,7 @@ async def register(bot, app_state, session):
             
             if not existing:
                 return await interaction.followup.send(
-                    f"❌ **{login}** bu sunucuda takip edilmiyor. Önce `/live add {login}` yapmalısın."
+                    f"❌ **{login}** is not tracked in this server. Use `/live add {login}` first."
                 )
 
             await db.execute(
@@ -676,13 +676,12 @@ async def register(bot, app_state, session):
             )
 
             await interaction.followup.send(
-                f"✅ Başarılı! Artık Twitch'teki **{login}** yayına girdiğinde, Discord'daki {member.mention} kullanıcısına Live rolü verilecek."
+                f"✅ Linked! When **{login}** goes live on Twitch, {member.mention} will receive the Live role."
             )
 
         except Exception as e:
-            logger.error(f"/live link hatası: {e}")
-            await interaction.followup.send("❌ Veritabanı hatası oluştu.")
-    # ===============================
+            logger.error(f"/live link error: {e}")
+            await interaction.followup.send("❌ A database error occurred.")
 
     @group.command(name="add", description="Track a Twitch streamer's live streams")
     @app_commands.describe(twitch_login="Twitch username to track (e.g. pokimane)")
@@ -809,14 +808,14 @@ async def register(bot, app_state, session):
     @app_commands.describe(twitch_login="Twitch username of the streamer currently live")
     async def force_notify(interaction: discord.Interaction, twitch_login: str):
         """
-        Kaçırılan bir canlı yayın bildirimi için manuel tetikleyici.
-        Streamer gerçekten canlıysa embed gönderir; değilse kullanıcıyı bilgilendirir.
+        Manual trigger for a missed live notification.
+        Posts the stream embed if the streamer is actually live; informs the user otherwise.
         """
         await interaction.response.defer(ephemeral=True)
         twitch_login = twitch_login.strip().lower()
 
         try:
-            # ── 1. Takip listesinde mi? ──────────────────────────────────────
+            # ── 1. Is the streamer tracked in this server? ───────────────────
             tracked = await db.fetchrow(
                 "SELECT twitch_user_id FROM streamers WHERE twitch_login = $1 AND guild_id = $2",
                 twitch_login, interaction.guild_id,
@@ -828,7 +827,7 @@ async def register(bot, app_state, session):
                     ephemeral=True,
                 )
 
-            # ── 2. Twitch API'den anlık durum kontrolü ───────────────────────
+            # ── 2. Check Twitch API for current live status ──────────────────
             live_streams = await app_state.twitch_api.get_streams_by_logins([twitch_login])
             if not live_streams:
                 return await interaction.followup.send(
@@ -840,7 +839,7 @@ async def register(bot, app_state, session):
             stream    = live_streams[0]
             state_key = (interaction.guild_id, twitch_login)
 
-            # ── 3. Zaten gönderilmiş mi? ─────────────────────────────────────
+            # ── 3. Already posted this session? ─────────────────────────────
             already_posted = monitor and monitor._state.get(state_key, {}).get("live")
             if already_posted:
                 return await interaction.followup.send(
@@ -850,7 +849,7 @@ async def register(bot, app_state, session):
                     ephemeral=True,
                 )
 
-            # ── 4. Kanal kontrolü ────────────────────────────────────────────
+            # ── 4. Announce channel configured? ─────────────────────────────
             channel_id = await _get_announce_channel_id(db, interaction.guild_id)
             if not channel_id:
                 return await interaction.followup.send(
@@ -859,7 +858,7 @@ async def register(bot, app_state, session):
                     ephemeral=True,
                 )
 
-            # ── 5. Bildirimi gönder ──────────────────────────────────────────
+            # ── 5. Post the notification ─────────────────────────────────────
             await monitor._post_live(
                 interaction.guild,
                 channel_id,
@@ -1071,23 +1070,42 @@ async def register(bot, app_state, session):
                     "📭 No streamers tracked yet. Use `/live add` to add one!",
                 )
 
-            monitor  = getattr(app_state, "stream_monitor", None)
-            live_now = set()
-            if monitor and hasattr(monitor, "_state"):
-                live_now = {
-                    login for (_, login), st in monitor._state.items()
-                    if st.get("live")
-                }
+            # ── Real-time live status — query Twitch API directly ────────────
+            # monitor._state only contains transitions the bot detected itself;
+            # it will be empty after a restart or before the first poll cycle.
+            all_logins = [r["twitch_login"] for r in rows]
+            live_now: set[str] = set()
+            try:
+                live_streams = await app_state.twitch_api.get_streams_by_logins(all_logins)
+                live_now = {s["user_login"].lower() for s in live_streams}
+            except Exception as e:
+                logger.warning(f"live_stats: Twitch API live check failed — {e}")
+                # Fallback: monitor in-memory state
+                monitor = getattr(app_state, "stream_monitor", None)
+                if monitor and hasattr(monitor, "_state"):
+                    live_now = {
+                        login for (_, login), st in monitor._state.items()
+                        if st.get("live")
+                    }
 
             embed = discord.Embed(
                 title=f"📊 Stream Stats — {interaction.guild.name}",
                 color=0x9146FF,
             )
 
+            # Build a login → stream map for current game lookup below
+            live_stream_map = {}
+            try:
+                live_stream_map = {
+                    s["user_login"].lower(): s for s in live_streams
+                }
+            except Exception:
+                pass
+
             for row in rows:
-                login     = row["twitch_login"]
-                url       = f"https://www.twitch.tv/{login}"
-                indicator = "🔴 " if login in live_now else ""
+                login = row["twitch_login"]
+                url   = f"https://www.twitch.tv/{login}"
+                is_live = login in live_now
 
                 if has_history:
                     count        = int(row["stream_count"] or 0)
@@ -1120,8 +1138,14 @@ async def register(bot, app_state, session):
                 else:
                     value = "💤 Stats build up after first stream."
 
+                # If live, prepend the current game being played
+                if is_live:
+                    live_data    = live_stream_map.get(login, {})
+                    current_game = live_data.get("game_name") or "Just Chatting"
+                    value = f"🎮 **{current_game}**\n" + value
+
                 embed.add_field(
-                    name=f"{indicator}[{login}]({url})",
+                    name=f"{'🔴 LIVE — ' if login in live_now else ''}[{login}]({url})",
                     value=value,
                     inline=True,
                 )
