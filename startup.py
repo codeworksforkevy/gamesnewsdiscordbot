@@ -6,6 +6,8 @@ import os
 
 import discord
 
+from events.stream_events import KNOWN_STREAMERS
+
 logger = logging.getLogger("startup")
 
 
@@ -134,14 +136,30 @@ async def startup_sync(bot) -> None:
                 if not callback_url:
                     logger.warning("No EventSub callback URL configured")
                 else:
-                    for s in streamers:
-                        try:
-                            await eventsub.ensure_subscriptions(
-                                s["twitch_user_id"], callback_url
+                    # Build subscription list: DB rows take priority,
+                    # then fill in any KNOWN_STREAMERS not yet in the DB.
+                    db_logins = {s["twitch_login"]: s["twitch_user_id"] for s in streamers}
+                    to_subscribe: dict[str, str] = {}
+
+                    # Add all DB streamers
+                    for login, uid in db_logins.items():
+                        if uid:
+                            to_subscribe[uid] = login
+
+                    # Add KNOWN_STREAMERS that aren't in the DB yet
+                    for login, uid in KNOWN_STREAMERS.items():
+                        if uid and login not in db_logins:
+                            to_subscribe[uid] = login
+                            logger.info(
+                                f"Known streamer not in DB — subscribing anyway: {login}"
                             )
-                            logger.info(f"EventSub subscribed: {s['twitch_login']}")
+
+                    for uid, login in to_subscribe.items():
+                        try:
+                            await eventsub.ensure_subscriptions(uid, callback_url)
+                            logger.info(f"EventSub subscribed: {login}")
                         except Exception as e:
-                            logger.warning(f"EventSub failed for {s['twitch_login']}: {e}")
+                            logger.warning(f"EventSub failed for {login}: {e}")
             else:
                 logger.info("EventSub not configured — using StreamMonitor polling")
 
