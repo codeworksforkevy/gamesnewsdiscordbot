@@ -1,11 +1,11 @@
 """
 db/migrations.py
 ────────────────────────────────────────────────────────────────
-Bot başlarken otomatik çalışan migration sistemi.
-Her migration idempotent (IF NOT EXISTS / ON CONFLICT) olduğu için
-defalarca çalıştırmak güvenlidir.
+Auto-migration system that runs on every bot startup.
+Every migration is idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING)
+so it is safe to run multiple times.
 
-main.py'de DB bağlandıktan hemen sonra çağır:
+Usage in main.py after DB connects:
     from db.migrations import run_migrations
     await run_migrations(app_state.db)
 """
@@ -16,19 +16,19 @@ import os
 logger = logging.getLogger("db.migrations")
 
 # ──────────────────────────────────────────────────────────────
-# GUILD & CHANNEL IDS (hardcoded fallback)
-# Railway env var olarak da ayarlanabilir
+# KNOWN GUILD / CHANNEL IDs (hardcoded fallback)
+# Override via Railway env vars if needed
 # ──────────────────────────────────────────────────────────────
 
-KEVKEVVY_GUILD_ID    = 1446560723122520207
-STREAM_CHANNEL_ID    = 1446562626695074006
-GAMES_CHANNEL_ID     = 1450903610559823873
+KEVKEVVY_GUILD_ID = 1446560723122520207
+STREAM_CHANNEL_ID = 1446562626695074006
+GAMES_CHANNEL_ID  = 1450903610559823873
 
 
 async def run_migrations(db) -> None:
     """
-    Tüm tabloları oluşturur, eksik kolonları ekler,
-    ve guild konfigürasyonunu yazar.
+    Creates all tables, adds missing columns, and seeds guild config.
+    Safe to call on every startup.
     """
     logger.info("🟢 DEBUG migrations: Starting run_migrations")
 
@@ -44,7 +44,7 @@ async def run_migrations(db) -> None:
 
 
 async def _create_tables(db) -> None:
-    """Tüm tabloları oluşturur — zaten varsa dokunmaz."""
+    """Creates all required tables — skips any that already exist."""
 
     await db.execute("""
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -100,6 +100,26 @@ async def _create_tables(db) -> None:
         )
     """)
 
+    # Primary streamer tracking table.
+    # twitch_user_id has a UNIQUE constraint so upsert ON CONFLICT works.
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS streamers (
+            id             BIGSERIAL   PRIMARY KEY,
+            guild_id       BIGINT      NOT NULL,
+            twitch_user_id TEXT        NOT NULL,
+            twitch_login   TEXT        NOT NULL,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            is_live        BOOLEAN     NOT NULL DEFAULT FALSE,
+            title          TEXT,
+            game_name      TEXT,
+            viewer_count   INTEGER,
+            last_updated   TIMESTAMPTZ,
+            target_channel_id BIGINT,
+            UNIQUE (twitch_user_id)
+        )
+    """)
+
+    # Separate live-state cache table (kept for backwards compatibility)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS streamer_states (
             twitch_user_id TEXT        NOT NULL PRIMARY KEY,
@@ -130,7 +150,7 @@ async def _create_tables(db) -> None:
             ON stream_history (twitch_login, started_at DESC)
     """)
 
-    # user_notifications — per-user DM subscriptions
+    # Per-user DM notification subscriptions
     await db.execute("""
         CREATE TABLE IF NOT EXISTS user_notifications (
             user_id      BIGINT  NOT NULL,
@@ -145,9 +165,8 @@ async def _create_tables(db) -> None:
 
 async def _fix_column_names(db) -> None:
     """
-    Eski guild_config.py, guild_configs tablosunu 'channel_id' kolonuyla
-    oluşturuyordu. Yeni kod 'announce_channel_id' bekliyor.
-    Bu fonksiyon kolonu güvenli şekilde yeniden adlandırır.
+    Renames guild_configs.channel_id → announce_channel_id if the old
+    column name still exists (created by an earlier version of guild_config.py).
     """
     try:
         row = await db.fetchrow("""
@@ -168,18 +187,18 @@ async def _fix_column_names(db) -> None:
 
 
 async def _add_missing_columns(db) -> None:
-    """Eksik kolonları ekler — zaten varsa hata vermez."""
+    """Adds any missing columns to existing tables — safe to run repeatedly."""
 
     guild_config_cols = [
-        ("games_channel_id",  "BIGINT"),
-        ("ping_role_id",      "BIGINT"),
-        ("live_role_id",      "BIGINT"),
-        ("notify_enabled",    "BOOLEAN NOT NULL DEFAULT TRUE"),
-        ("enable_ping",       "BOOLEAN NOT NULL DEFAULT TRUE"),
-        ("enable_epic",       "BOOLEAN NOT NULL DEFAULT FALSE"),
-        ("enable_gog",        "BOOLEAN NOT NULL DEFAULT FALSE"),
-        ("enable_steam",      "BOOLEAN NOT NULL DEFAULT FALSE"),
-        ("updated_at",        "TIMESTAMPTZ NOT NULL DEFAULT NOW()"),
+        ("games_channel_id", "BIGINT"),
+        ("ping_role_id",     "BIGINT"),
+        ("live_role_id",     "BIGINT"),
+        ("notify_enabled",   "BOOLEAN NOT NULL DEFAULT TRUE"),
+        ("enable_ping",      "BOOLEAN NOT NULL DEFAULT TRUE"),
+        ("enable_epic",      "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("enable_gog",       "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("enable_steam",     "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("updated_at",       "TIMESTAMPTZ NOT NULL DEFAULT NOW()"),
     ]
 
     for col, col_type in guild_config_cols:
@@ -191,11 +210,12 @@ async def _add_missing_columns(db) -> None:
             pass  # column already exists
 
     streamer_cols = [
-        ("is_live",      "BOOLEAN NOT NULL DEFAULT FALSE"),
-        ("title",        "TEXT"),
-        ("game_name",    "TEXT"),
-        ("viewer_count", "INTEGER"),
-        ("last_updated", "TIMESTAMPTZ"),
+        ("is_live",           "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("title",             "TEXT"),
+        ("game_name",         "TEXT"),
+        ("viewer_count",      "INTEGER"),
+        ("last_updated",      "TIMESTAMPTZ"),
+        ("target_channel_id", "BIGINT"),
     ]
 
     for col, col_type in streamer_cols:
@@ -206,11 +226,21 @@ async def _add_missing_columns(db) -> None:
         except Exception:
             pass
 
-    # updated_at trigger
+    # Ensure the UNIQUE constraint on twitch_user_id exists so that
+    # ON CONFLICT (twitch_user_id) in upsert_streamer works correctly.
     try:
         await db.execute("""
-            DROP TRIGGER IF EXISTS trg_guild_configs_updated_at ON guild_configs
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_streamers_twitch_user_id
+                ON streamers (twitch_user_id)
         """)
+    except Exception:
+        pass
+
+    # updated_at trigger for guild_configs
+    try:
+        await db.execute(
+            "DROP TRIGGER IF EXISTS trg_guild_configs_updated_at ON guild_configs"
+        )
         await db.execute("""
             CREATE TRIGGER trg_guild_configs_updated_at
                 BEFORE UPDATE ON guild_configs
@@ -219,27 +249,18 @@ async def _add_missing_columns(db) -> None:
     except Exception:
         pass
 
-    # target_channel_id — per-streamer override channel (optional)
-    try:
-        await db.execute(
-            "ALTER TABLE streamers ADD COLUMN IF NOT EXISTS target_channel_id BIGINT"
-        )
-    except Exception:
-        pass
-
     logger.info("Columns verified/added")
 
 
 async def _seed_guild_config(db) -> None:
     """
-    Bilinen guild konfigürasyonunu yazar.
-    ON CONFLICT DO UPDATE ile güvenli — varsa günceller.
+    Writes the known guild config to both config tables.
+    ON CONFLICT DO UPDATE makes this safe to run on every startup.
+    Railway env vars take priority over hardcoded fallback values.
     """
-
-    # Env var'dan da okuyabilir — Railway'de değişken set edilirse öncelikli
-    guild_id      = int(os.getenv("MAIN_GUILD_ID",       str(KEVKEVVY_GUILD_ID)))
-    stream_ch     = int(os.getenv("STREAM_CHANNEL_ID",   str(STREAM_CHANNEL_ID)))
-    games_ch      = int(os.getenv("GAMES_CHANNEL_ID",    str(GAMES_CHANNEL_ID)))
+    guild_id  = int(os.getenv("MAIN_GUILD_ID",     str(KEVKEVVY_GUILD_ID)))
+    stream_ch = int(os.getenv("STREAM_CHANNEL_ID", str(STREAM_CHANNEL_ID)))
+    games_ch  = int(os.getenv("GAMES_CHANNEL_ID",  str(GAMES_CHANNEL_ID)))
 
     await db.execute("""
         INSERT INTO guild_configs (
