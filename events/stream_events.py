@@ -108,8 +108,8 @@ def _live_embed(login: str, user_name: str, stream: dict) -> discord.Embed:
         name=f"🔴 {user_name} is live!",
         url=f"https://twitch.tv/{login}",
     )
-    embed.add_field(name="🎮 Game",    value=game,   inline=True)
-    embed.add_field(name="⏱️ Started", value=ts_str, inline=True)
+    embed.add_field(name="🕹️ Game",   value=game,   inline=True)
+    embed.add_field(name="☕ Started", value=ts_str, inline=True)
     embed.set_image(url=thumbnail)
     embed.set_footer(text=f"twitch.tv/{login}")
     embed.timestamp = discord.utils.utcnow()
@@ -135,7 +135,7 @@ def _change_embed(login: str, user_name: str, changes: dict) -> discord.Embed:
         )
     if "game" in changes:
         embed.add_field(
-            name="🎮 Game",
+            name="🕹️ Game",
             value=f"~~{changes['game']['old']}~~\n→ **{changes['game']['new']}**",
             inline=False,
         )
@@ -151,7 +151,7 @@ def _offline_embed(login: str, user_name: str, start_ts: Optional[float]) -> dis
         mins  = int((time.time() - start_ts) / 60)
         hours = mins // 60
         rest  = mins % 60
-        desc += f"\n\n🕐 Stream duration: **{hours}h {rest}m**"
+        desc += f"\n\n🍵 Stream duration: **{hours}h {rest}m**"
 
     embed = discord.Embed(description=desc, color=COLOR_OFFLINE)
     embed.set_author(
