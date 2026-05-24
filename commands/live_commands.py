@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 
 from core.event_bus import event_bus
+from events.stream_events import KNOWN_STREAMERS
 
 logger = logging.getLogger("live-commands")
 
@@ -51,15 +52,15 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     if profile_url:
         embed.set_thumbnail(url=profile_url)
 
-    embed.add_field(name="Game",    value=game,   inline=True)
-    embed.add_field(name="Started", value=ts_str, inline=True)
+    embed.add_field(name="🕹️ Game",   value=game,   inline=True)
+    embed.add_field(name="☕ Started", value=ts_str, inline=True)
 
     raw_thumb = stream.get("thumbnail_url", "")
     thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
     if thumbnail:
         embed.set_image(url=f"{thumbnail}?v={int(time.time())}")
 
-    embed.set_footer(text="Vibes: Very Cool")
+    embed.set_footer(text=f"twitch.tv/{login}")
     embed.timestamp = discord.utils.utcnow()
     return embed
 
@@ -77,18 +78,18 @@ def build_offline_embed(
 
     embed = discord.Embed(
         description=f"*{title_text}*" if title_text else None,
-        color=0x2f3136,
+        color=0x1C1C2E,
     )
 
     icon_url = user_info.get("profile_image_url") if user_info else None
     embed.set_author(
-        name=f"{display_name} was live on Twitch",
+        name=f"👩‍💻 {display_name} was live on Twitch",
         url=stream_url,
         icon_url=icon_url,
     )
 
-    embed.add_field(name="🕹️ Game",  value=game,                                   inline=True)
-    embed.add_field(name="Duration", value=duration or "Unknown",                  inline=True)
+    embed.add_field(name="🕹️ Game",     value=game,                                   inline=True)
+    embed.add_field(name="🍵 Duration", value=duration or "Unknown",                  inline=True)
     embed.add_field(
         name="🖳 VOD",
         value=f"[Click to view]({vod_url})" if vod_url
@@ -269,6 +270,16 @@ class StreamMonitor:
         except Exception as e:
             logger.error(f"🔴 DEBUG StreamMonitor: DB fetch failed — {e}")
             return
+
+        # Merge DB rows with KNOWN_STREAMERS so streamers not yet in the DB
+        # (e.g. r1sky_90 before their first /live add) are still polled.
+        db_logins = {r["twitch_login"] for r in rows}
+        extra = [
+            {"twitch_login": login, "twitch_user_id": uid}
+            for login, uid in KNOWN_STREAMERS.items()
+            if login not in db_logins and uid is not None
+        ]
+        rows = list(rows) + extra
 
         if not rows:
             logger.info("🟡 DEBUG StreamMonitor: no streamers in DB — nothing to poll")
@@ -471,7 +482,7 @@ class StreamMonitor:
             if change_type in ("title", "title+game"):
                 lines.append(f"📝 **Title:** ~~{prev.get('title', '?')}~~ → **{new_title}**")
             if change_type in ("game", "title+game"):
-                lines.append(f"🎮 **Game:** ~~{prev.get('game', '?')}~~ → **{new_game}**")
+                lines.append(f"🕹️ **Game:** ~~{prev.get('game', '?')}~~ → **{new_game}**")
 
             update_embed = discord.Embed(
                 title="📡 Stream Updated",
