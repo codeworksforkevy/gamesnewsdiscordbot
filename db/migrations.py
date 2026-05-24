@@ -104,17 +104,18 @@ async def _create_tables(db) -> None:
     # twitch_user_id has a UNIQUE constraint so upsert ON CONFLICT works.
     await db.execute("""
         CREATE TABLE IF NOT EXISTS streamers (
-            id             BIGSERIAL   PRIMARY KEY,
-            guild_id       BIGINT      NOT NULL,
-            twitch_user_id TEXT        NOT NULL,
-            twitch_login   TEXT        NOT NULL,
-            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            is_live        BOOLEAN     NOT NULL DEFAULT FALSE,
-            title          TEXT,
-            game_name      TEXT,
-            viewer_count   INTEGER,
-            last_updated   TIMESTAMPTZ,
+            id                BIGSERIAL   PRIMARY KEY,
+            guild_id          BIGINT      NOT NULL,
+            twitch_user_id    TEXT        NOT NULL,
+            twitch_login      TEXT        NOT NULL,
+            created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            is_live           BOOLEAN     NOT NULL DEFAULT FALSE,
+            title             TEXT,
+            game_name         TEXT,
+            viewer_count      INTEGER,
+            last_updated      TIMESTAMPTZ,
             target_channel_id BIGINT,
+            discord_user_id   BIGINT,
             UNIQUE (twitch_user_id)
         )
     """)
@@ -216,6 +217,7 @@ async def _add_missing_columns(db) -> None:
         ("viewer_count",      "INTEGER"),
         ("last_updated",      "TIMESTAMPTZ"),
         ("target_channel_id", "BIGINT"),
+        ("discord_user_id",   "BIGINT"),  # Discord member linked to this streamer for role assignment
     ]
 
     for col, col_type in streamer_cols:
