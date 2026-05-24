@@ -1,8 +1,8 @@
 """
 events/stream_events.py
 ────────────────────────────────────────────────────────────────
-Verwerkt alle Twitch EventSub-events (online, offline, channel.update).
-Samenvoegde community-routing, API-vertragingsfallbacks en DB-synchronisatie.
+Handles all Twitch EventSub events (online, offline, channel.update).
+Merged community routing, API delay fallbacks, and DB sync.
 """
 
 import asyncio
@@ -22,29 +22,49 @@ from utils.stream_diff import detect_changes
 logger = logging.getLogger("stream-events")
 
 # ──────────────────────────────────────────────────────────────
-# CONSTANTEN & ROUTING
+# CONSTANTS & ROUTING
 # ──────────────────────────────────────────────────────────────
 
-LIVE_TTL  = 60 * 60 * 6    # 6 uur — actieve livestream-cache
-META_TTL  = 300             # 5 minuten — stroommetadata voor wijzigingsdetectie
+LIVE_TTL  = 60 * 60 * 6    # 6 hours — active livestream cache
+META_TTL  = 300             # 5 minutes — stream metadata for change detection
 
-# Kleurenpalet — consistent met Find a Curie-embeds
-COLOR_LIVE    = 0xFFB6C1   # Babyroos — live-aankondiging
-COLOR_UPDATE  = 0xF5A623   # Amber — stream-updates
-COLOR_OFFLINE = 0x1C1C2E   # Donker marineblauw — offline-embed
+# Color palette — consistent with Find a Curie embeds
+COLOR_LIVE    = 0xFFB6C1   # Baby pink  — live announcement
+COLOR_UPDATE  = 0xF5A623   # Amber      — stream updates
+COLOR_OFFLINE = 0x1C1C2E   # Dark navy  — offline embed
+
+# Known streamers — used as a fallback seed list on startup
+# so EventSub subscriptions are always created even if the DB is empty.
+KNOWN_STREAMERS: dict[str, str] = {
+    "amble_may2002":    "623178384",
+    "bigbootykennyx":   "481101604",
+    "cxrrinajxyne":     "535859139",
+    "ellefyi":          "639451042",
+    "eziverse":         "617198890",
+    "frasedisplays":    "54088839",
+    "keats___":         "256599363",
+    "mirellemistlight": "786543297",
+    "mkaybecca":        "233809759",
+    "mousey2975":       "231954099",
+    "neledraaa":        "555678290",
+    "niiaaah":          "1041575461",
+    "pancitplease":     "766528698",
+    "r1sky_90":         None,   # twitch_user_id unknown — lookup on first event
+    "realgirlsdontgame": "535406506",
+}
 
 KEVKEVVY_LOGIN      = "kevkevvy"
 KEVKEVVY_CHANNEL_ID = 1446562544612540645
 
-# Redis-sleutelhulpfuncties
-def _meta_key(login: str) -> str:    return f"stream:meta:{login}"
-def _status_key(login: str) -> str:  return f"stream:status:{login}"
+# Redis key helpers
+def _meta_key(login: str) -> str:   return f"stream:meta:{login}"
+def _status_key(login: str) -> str: return f"stream:status:{login}"
 def _msg_key(login: str, guild_id: int) -> str: return f"stream:msg:{login}:{guild_id}"
-def _start_key(login: str) -> str:   return f"stream:start:{login}"
+def _start_key(login: str) -> str:  return f"stream:start:{login}"
 
 
 def _get_target_channel(guild: discord.Guild, config: dict, login: str) -> Optional[discord.TextChannel]:
-    """Geeft het juiste aankondigingskanaal terug op basis van streamer-login."""
+    """Returns the correct announcement channel based on streamer login."""
     if login == KEVKEVVY_LOGIN:
         ch = guild.get_channel(KEVKEVVY_CHANNEL_ID)
         if ch:
@@ -54,23 +74,23 @@ def _get_target_channel(guild: discord.Guild, config: dict, login: str) -> Optio
 
 
 # ──────────────────────────────────────────────────────────────
-# EMBED-BOUWERS
+# EMBED BUILDERS
 # ──────────────────────────────────────────────────────────────
 
 def _live_embed(login: str, user_name: str, stream: dict) -> discord.Embed:
-    """Babyroos live-aankondigings-embed — stijl conform Find a Curie."""
-    title     = stream.get("title") or "Geen titel opgegeven"
-    game      = stream.get("game_name") or "Just Chatting"
+    """Baby pink live announcement embed — Find a Curie style."""
+    title      = stream.get("title") or "No title set"
+    game       = stream.get("game_name") or "Just Chatting"
     started_at = stream.get("started_at", "")
 
-    # Thumbnail met cache-busting voor live voorbeeld
+    # Thumbnail with cache-busting for a fresh live preview
     thumbnail = (
         f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{login}-1280x720.jpg"
         f"?t={int(time.time())}"
     )
 
-    # Relatieve timestamp
-    ts_str = "zonet"
+    # Relative Discord timestamp
+    ts_str = "just now"
     if started_at:
         try:
             from datetime import datetime
@@ -88,8 +108,8 @@ def _live_embed(login: str, user_name: str, stream: dict) -> discord.Embed:
         name=f"🔴 {user_name} is live!",
         url=f"https://twitch.tv/{login}",
     )
-    embed.add_field(name="🎮 Spel",       value=game,   inline=True)
-    embed.add_field(name="⏱️ Gestart",   value=ts_str, inline=True)
+    embed.add_field(name="🎮 Game",    value=game,   inline=True)
+    embed.add_field(name="⏱️ Started", value=ts_str, inline=True)
     embed.set_image(url=thumbnail)
     embed.set_footer(text=f"twitch.tv/{login}")
     embed.timestamp = discord.utils.utcnow()
@@ -97,9 +117,9 @@ def _live_embed(login: str, user_name: str, stream: dict) -> discord.Embed:
 
 
 def _change_embed(login: str, user_name: str, changes: dict) -> discord.Embed:
-    """Amber-embed voor stream-updates (titelwijziging of spelwisseling)."""
+    """Amber embed for stream updates (title change or game switch)."""
     embed = discord.Embed(
-        title="📡 Stream bijgewerkt",
+        title="📡 Stream Updated",
         url=f"https://twitch.tv/{login}",
         color=COLOR_UPDATE,
     )
@@ -109,13 +129,13 @@ def _change_embed(login: str, user_name: str, changes: dict) -> discord.Embed:
     )
     if "title" in changes:
         embed.add_field(
-            name="📝 Titel",
+            name="📝 Title",
             value=f"~~{changes['title']['old']}~~\n→ **{changes['title']['new']}**",
             inline=False,
         )
     if "game" in changes:
         embed.add_field(
-            name="🎮 Spel",
+            name="🎮 Game",
             value=f"~~{changes['game']['old']}~~\n→ **{changes['game']['new']}**",
             inline=False,
         )
@@ -125,13 +145,13 @@ def _change_embed(login: str, user_name: str, changes: dict) -> discord.Embed:
 
 
 def _offline_embed(login: str, user_name: str, start_ts: Optional[float]) -> discord.Embed:
-    """Donker marineblauw offline-embed — stijl conform Find a Curie."""
-    desc = f"**{user_name}** heeft de stream beëindigd."
+    """Dark navy offline embed — Find a Curie style."""
+    desc = f"**{user_name}** has ended their stream."
     if start_ts:
         mins  = int((time.time() - start_ts) / 60)
-        uren  = mins // 60
+        hours = mins // 60
         rest  = mins % 60
-        desc += f"\n\n🕐 Streamduur: **{uren}u {rest}m**"
+        desc += f"\n\n🕐 Stream duration: **{hours}h {rest}m**"
 
     embed = discord.Embed(description=desc, color=COLOR_OFFLINE)
     embed.set_author(
@@ -144,7 +164,7 @@ def _offline_embed(login: str, user_name: str, start_ts: Optional[float]) -> dis
 
 
 # ──────────────────────────────────────────────────────────────
-# HULPFUNCTIE — BERICHT VERZENDEN OF BEWERKEN
+# HELPER — SEND OR EDIT
 # ──────────────────────────────────────────────────────────────
 
 async def _send_or_edit(
@@ -155,8 +175,8 @@ async def _send_or_edit(
     embed: discord.Embed,
 ) -> None:
     """
-    Bewerkt het bestaande live-bericht als het nog bestaat in Redis,
-    anders wordt er een nieuw bericht geplaatst.
+    Edits the existing live message if it's still tracked in Redis,
+    otherwise sends a new one.
     """
     msg_key = _msg_key(login, guild_id)
     stored  = await redis_client.get(msg_key)
@@ -166,45 +186,45 @@ async def _send_or_edit(
             await msg.edit(content=content, embed=embed)
             return
         except Exception:
-            pass  # Bericht verwijderd of niet meer bereikbaar — stuur nieuw
+            pass  # Message was deleted or no longer reachable — send new
     msg = await channel.send(content=content, embed=embed)
     await redis_client.set(msg_key, str(msg.id), ttl=LIVE_TTL)
 
 
 # ──────────────────────────────────────────────────────────────
-# EVENT-HANDLERS
+# EVENT HANDLERS
 # ──────────────────────────────────────────────────────────────
 
 async def handle_stream_online(bot, event: dict) -> None:
     """
-    Verwerkt stream.online-event.
-    Gebruikt het unieke stream-ID van Twitch om dubbele meldingen te voorkomen.
+    Handles stream.online event.
+    Uses Twitch's unique stream ID to prevent duplicate notifications.
     """
-    login      = event["broadcaster_user_login"].lower()
-    user_name  = event.get("broadcaster_user_name", login)
-    b_id       = event.get("broadcaster_user_id")
-    stream_id  = event.get("id", "live")  # Uniek Twitch-stream-ID — voorkomt spooksloten
+    login     = event["broadcaster_user_login"].lower()
+    user_name = event.get("broadcaster_user_name", login)
+    b_id      = event.get("broadcaster_user_id")
+    stream_id = event.get("id", "live")  # Unique Twitch stream ID — prevents ghost locks
 
-    # Sla op als hetzelfde stream-ID al actief is
+    # Skip if the same stream ID is already marked as active
     already_live_id = await redis_client.get(_status_key(login))
     if already_live_id == stream_id:
-        logger.info(f"Dubbel stream.online genegeerd voor {login} (zelfde stream_id)")
+        logger.info(f"Duplicate stream.online ignored for {login} (same stream_id)")
         return
 
-    await redis_client.set(_status_key(login), stream_id,         ttl=LIVE_TTL)
-    await redis_client.set(_start_key(login),  str(time.time()),  ttl=LIVE_TTL)
+    await redis_client.set(_status_key(login), stream_id,        ttl=LIVE_TTL)
+    await redis_client.set(_start_key(login),  str(time.time()), ttl=LIVE_TTL)
 
-    # Twitch API heeft soms een korte vertraging na het online-event
+    # Twitch API sometimes lags slightly behind the online event
     new_stream = await get_cached_stream(login)
     if not new_stream:
         await asyncio.sleep(10)
         new_stream = await get_cached_stream(login)
 
-    # Fallback als API nog niet reageert
+    # Fallback if API still hasn't caught up
     if not new_stream:
-        new_stream = {"title": "Live!", "game_name": "Onbekend"}
+        new_stream = {"title": "Live!", "game_name": "Unknown"}
 
-    # Stuur aankondiging naar alle relevante servers
+    # Send announcement to all relevant guilds
     for guild in bot.guilds:
         config = await get_guild_config(guild.id)
         if not config:
@@ -229,8 +249,8 @@ async def handle_stream_online(bot, event: dict) -> None:
 
 async def handle_stream_offline(bot, event: dict) -> None:
     """
-    Verwerkt stream.offline-event.
-    Stuurt donkere offline-embed en ruimt Redis-sleutels op.
+    Handles stream.offline event.
+    Sends dark navy offline embed and cleans up Redis keys.
     """
     login     = event["broadcaster_user_login"].lower()
     user_name = event.get("broadcaster_user_name", login)
@@ -239,7 +259,7 @@ async def handle_stream_offline(bot, event: dict) -> None:
     if b_id:
         await set_stream_offline(b_id)
 
-    # Haal starttijd op vóór verwijdering
+    # Retrieve start time before deleting keys
     start_ts = float(await redis_client.get(_start_key(login)) or 0)
     await redis_client.delete(_status_key(login), _meta_key(login), _start_key(login))
 
@@ -255,13 +275,13 @@ async def handle_stream_offline(bot, event: dict) -> None:
 
 async def handle_channel_update(bot, event: dict) -> None:
     """
-    Verwerkt channel.update-event.
-    Stuurt alleen een embed als er een echte wijziging is en de stream actief is.
+    Handles channel.update event.
+    Only posts an embed if there is an actual change and the stream is active.
     """
     login     = event["broadcaster_user_login"].lower()
     user_name = event.get("broadcaster_user_name", login)
 
-    # Negeer updates als de streamer momenteel offline is
+    # Ignore updates if the streamer is currently offline
     if not await redis_client.get(_status_key(login)):
         return
 
