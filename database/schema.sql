@@ -20,7 +20,7 @@
 --
 -- 2. streamers in schema.sql used (guild_id, twitch_user_id) as a UNIQUE
 --    composite key with a SERIAL surrogate PK — but streamer_queries.py
---    does ON CONFLICT (broadcaster_id) DO UPDATE. A composite unique key
+--    does ON CONFLICT (twitch_user_id) DO UPDATE. A composite unique key
 --    on (guild_id, twitch_user_id) is NOT the same conflict target, so
 --    every upsert would insert a duplicate row instead of updating.
 --    Fixed: broadcaster_id TEXT PRIMARY KEY (matching all Python queries).
@@ -153,11 +153,14 @@ CREATE INDEX IF NOT EXISTS idx_notif_channels_active
 
 CREATE TABLE IF NOT EXISTS streamers (
 
-    broadcaster_id  TEXT    NOT NULL PRIMARY KEY,   -- Twitch numeric user ID
+    twitch_user_id  TEXT    NOT NULL,   -- Twitch numeric user ID
     twitch_login    TEXT    NOT NULL,               -- lowercased handle, e.g. "ninja"
 
     -- Optional Discord member link for reliable role assignment
     -- (live_role_cog uses this; falls back to nickname scan if NULL)
+    discord_user_id BIGINT,
+
+    -- Optional Discord member link for reliable role assignment
     discord_user_id BIGINT,
 
     -- Which guild added this broadcaster (informational)
@@ -170,7 +173,12 @@ CREATE TABLE IF NOT EXISTS streamers (
     viewer_count    INTEGER,
     last_updated    TIMESTAMPTZ,
 
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    -- Optional per-streamer channel override
+    target_channel_id BIGINT,
+
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE (twitch_user_id)
 );
 
 -- Login lookups (event payloads arrive as login string)
@@ -246,6 +254,39 @@ CREATE INDEX IF NOT EXISTS idx_event_logs_received
 -- Query inside JSONB payloads
 CREATE INDEX IF NOT EXISTS idx_event_logs_payload
     ON twitch_event_logs USING GIN (payload);
+
+
+-- =============================================================================
+-- STREAM HISTORY
+-- =============================================================================
+-- One row per stream session. Written by live_commands._post_live().
+
+CREATE TABLE IF NOT EXISTS stream_history (
+    id            BIGSERIAL   PRIMARY KEY,
+    twitch_login  TEXT        NOT NULL,
+    guild_id      BIGINT      NOT NULL,
+    title         TEXT,
+    game_name     TEXT,
+    peak_viewers  INTEGER     DEFAULT 0,
+    started_at    TIMESTAMPTZ,
+    ended_at      TIMESTAMPTZ,
+    duration_secs INTEGER     DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_stream_history_login
+    ON stream_history (twitch_login, started_at DESC);
+
+-- =============================================================================
+-- USER NOTIFICATIONS
+-- =============================================================================
+-- Per-user DM opt-in subscriptions managed by /notify commands.
+
+CREATE TABLE IF NOT EXISTS user_notifications (
+    user_id      BIGINT  NOT NULL,
+    guild_id     BIGINT  NOT NULL,
+    twitch_login TEXT    NOT NULL,
+    PRIMARY KEY (user_id, twitch_login)
+);
 
 -- =============================================================================
 -- RECORD MIGRATION
