@@ -3,17 +3,17 @@ discord.py==2.3.2
 PyNaCl==1.5.0
 
 # Async + Networking
-aiohttp==3.9.3
+aiohttp==3.10.5          # 3.9.x has no Python 3.13 wheels
 
 # Database
-asyncpg==0.29.0
+asyncpg==0.30.0          # 0.29.x has no Python 3.13 wheels
 
-# Cache (Redis - modern)
+# Cache (Redis)
 redis[asyncio]==5.0.1
 
 # Parsing / Scraping
 beautifulsoup4==4.12.3
-lxml==5.1.0
+lxml==5.3.0              # 5.1.x has no Python 3.13 wheels
 
 # Environment
 python-dotenv==1.0.1
@@ -22,7 +22,7 @@ python-dotenv==1.0.1
 cryptography==42.0.5
 
 # Performance (Linux only)
-uvloop==0.19.0 ; sys_platform != "win32"
+uvloop==0.21.0 ; sys_platform != "win32"  # 0.19.x does not support Python 3.13
 
 # ==================================================
 # Twitch + EventSub + Infra
@@ -36,7 +36,7 @@ uvicorn[standard]==0.27.1
 pydantic==2.6.4
 
 # JSON
-orjson==3.9.15
+orjson==3.10.7           # 3.9.x has no Python 3.13 wheels
 
 # Retry
 tenacity==8.2.3
