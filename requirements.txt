@@ -1,5 +1,5 @@
 # Core Discord
-discord.py==2.3.2
+discord.py==2.4.0
 PyNaCl==1.5.0
 
 # Async + Networking
@@ -29,11 +29,11 @@ uvloop==0.21.0 ; sys_platform != "win32"  # 0.19.x does not support Python 3.13
 # ==================================================
 
 # Web server
-fastapi>=0.115.0,<1
+fastapi==0.115.5          # 0.110.x requires pydantic-core which has no 3.13 wheels
 uvicorn[standard]==0.27.1
 
-# Validation
-pydantic>=2.10,<3
+# Validation — pydantic 2.10+ ships pydantic-core with Python 3.13 wheels
+pydantic==2.10.6
 
 # JSON
 orjson==3.10.7           # 3.9.x has no Python 3.13 wheels
