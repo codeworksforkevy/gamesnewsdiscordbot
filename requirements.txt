@@ -29,11 +29,11 @@ uvloop==0.21.0 ; sys_platform != "win32"  # 0.19.x does not support Python 3.13
 # ==================================================
 
 # Web server
-fastapi==0.110.0
+fastapi>=0.115.0,<1
 uvicorn[standard]==0.27.1
 
 # Validation
-pydantic==2.6.4
+pydantic>=2.10,<3
 
 # JSON
 orjson==3.10.7           # 3.9.x has no Python 3.13 wheels
