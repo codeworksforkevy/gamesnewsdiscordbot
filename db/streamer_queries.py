@@ -21,7 +21,7 @@ logger = logging.getLogger("db.streamers")
 # ──────────────────────────────────────────────────────────────
 
 async def upsert_streamer(
-    broadcaster_id: str,
+    twitch_user_id: str,
     twitch_login:   str,
     guild_id:       int,
 ) -> None:
@@ -31,7 +31,7 @@ async def upsert_streamer(
         await conn.execute(
             """
             INSERT INTO streamers (
-                broadcaster_id,
+                twitch_user_id,
                 twitch_login,
                 guild_id,
                 is_live,
@@ -40,12 +40,12 @@ async def upsert_streamer(
                 last_updated
             )
             VALUES ($1, $2, $3, FALSE, NULL, NULL, NOW())
-            ON CONFLICT (broadcaster_id) DO UPDATE SET
+            ON CONFLICT (twitch_user_id) DO UPDATE SET
                 twitch_login = EXCLUDED.twitch_login,
                 guild_id     = EXCLUDED.guild_id,
                 last_updated = NOW()
             """,
-            broadcaster_id,
+            twitch_user_id,
             twitch_login,
             guild_id,
         )
@@ -53,7 +53,7 @@ async def upsert_streamer(
     logger.info(
         "Streamer upserted",
         extra={"extra_data": {
-            "broadcaster_id": broadcaster_id,
+            "twitch_user_id": twitch_user_id,
             "twitch_login":   twitch_login,
         }},
     )
@@ -64,7 +64,7 @@ async def upsert_streamer(
 # ──────────────────────────────────────────────────────────────
 
 async def set_stream_live(
-    broadcaster_id: str,
+    twitch_user_id: str,
     title:          str,
     game_name:      str,
 ) -> None:
@@ -78,15 +78,15 @@ async def set_stream_live(
                 title        = $2,
                 game_name    = $3,
                 last_updated = NOW()
-            WHERE broadcaster_id = $1
+            WHERE twitch_user_id = $1
             """,
-            broadcaster_id,
+            twitch_user_id,
             title,
             game_name,
         )
 
 
-async def set_stream_offline(broadcaster_id: str) -> None:
+async def set_stream_offline(twitch_user_id: str) -> None:
     pool = state.get_db_pool()
 
     async with pool.acquire() as conn:
@@ -97,9 +97,9 @@ async def set_stream_offline(broadcaster_id: str) -> None:
                 title        = NULL,
                 game_name    = NULL,
                 last_updated = NOW()
-            WHERE broadcaster_id = $1
+            WHERE twitch_user_id = $1
             """,
-            broadcaster_id,
+            twitch_user_id,
         )
 
 
@@ -107,7 +107,7 @@ async def set_stream_offline(broadcaster_id: str) -> None:
 # READ
 # ──────────────────────────────────────────────────────────────
 
-async def get_streamer(broadcaster_id: str) -> Optional[Dict]:
+async def get_streamer(twitch_user_id: str) -> Optional[Dict]:
     pool = state.get_db_pool()
 
     async with pool.acquire() as conn:
@@ -115,9 +115,9 @@ async def get_streamer(broadcaster_id: str) -> Optional[Dict]:
             """
             SELECT *
             FROM streamers
-            WHERE broadcaster_id = $1
+            WHERE twitch_user_id = $1
             """,
-            broadcaster_id,
+            twitch_user_id,
         )
 
         return dict(row) if row else None
