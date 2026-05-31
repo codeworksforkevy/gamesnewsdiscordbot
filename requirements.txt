@@ -1,5 +1,6 @@
 # Core Discord
 discord.py==2.4.0
+audioop-lts==1.2.1.post0   # audioop was removed in Python 3.13; this restores it
 PyNaCl==1.5.0
 
 # Async + Networking
