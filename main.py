@@ -349,13 +349,17 @@ async def _start_web_server(bot, app_state) -> web.AppRunner:
     runner = web.AppRunner(main_app)
     await runner.setup()
 
+    # ── FIXED WEB SERVER SETUP ──
+    # Dynamically grab the port assigned by Railway (fallback to 8080)
     port = int(os.getenv("PORT", "8080"))
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    
+    # Must bind to 0.0.0.0 so Railway's external router can pass Twitch webhooks through
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
 
     logger.info(
         "Web server started",
-        extra={"extra_data": {"port": port}},
+        extra={"extra_data": {"port": port, "host": "0.0.0.0"}},
     )
     return runner
 
