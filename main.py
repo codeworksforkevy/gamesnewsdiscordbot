@@ -183,33 +183,33 @@ def _setup_event_handlers() -> None:
     """Wires all event_bus subscribers before the bot connects."""
     register_notifier(bot)
 
-    # Yeni streamer eklendiğinde Twitch EventSub aboneliği otomatik oluştur
+    # Auto-subscribe to Twitch EventSub when a new streamer is added via /live add
     async def _on_streamer_added(payload: dict) -> None:
         eventsub = getattr(app_state, "eventsub_manager", None)
         if not eventsub:
-            logger.warning("streamer_added: EventSubManager yok — abonelik oluşturulamadı")
+            logger.warning("streamer_added: no EventSubManager — subscription skipped")
             return
 
         twitch_user_id = payload.get("twitch_user_id")
         twitch_login   = payload.get("twitch_login", "?")
 
         if not twitch_user_id:
-            logger.warning(f"streamer_added: twitch_user_id eksik ({twitch_login})")
+            logger.warning(f"streamer_added: twitch_user_id missing ({twitch_login})")
             return
 
         callback_url = eventsub.callback_url
         if not callback_url:
             logger.warning(
-                f"streamer_added: callback URL yapılandırılmamış — "
-                f"{twitch_login} için abonelik oluşturulamadı"
+                f"streamer_added: callback URL not configured — "
+                f"subscription skipped for {twitch_login}"
             )
             return
 
         try:
             await eventsub.ensure_subscriptions(str(twitch_user_id), callback_url)
-            logger.info(f"EventSub abonelikleri oluşturuldu: {twitch_login}")
+            logger.info(f"EventSub subscriptions created: {twitch_login}")
         except Exception as e:
-            logger.error(f"EventSub abonelik hatası ({twitch_login}): {e}", exc_info=True)
+            logger.error(f"EventSub subscription error for {twitch_login}: {e}", exc_info=True)
 
     event_bus.subscribe("streamer_added", _on_streamer_added)
     logger.info("Core event handlers registered")
@@ -349,17 +349,13 @@ async def _start_web_server(bot, app_state) -> web.AppRunner:
     runner = web.AppRunner(main_app)
     await runner.setup()
 
-    # ── FIXED WEB SERVER SETUP ──
-    # Dynamically grab the port assigned by Railway (fallback to 8080)
     port = int(os.getenv("PORT", "8080"))
-    
-    # Must bind to 0.0.0.0 so Railway's external router can pass Twitch webhooks through
-    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
     logger.info(
         "Web server started",
-        extra={"extra_data": {"port": port, "host": "0.0.0.0"}},
+        extra={"extra_data": {"port": port}},
     )
     return runner
 
@@ -385,10 +381,31 @@ async def main() -> None:
     global_state.set_db_pool(app_state.db.pool)
 
     # ── Auto-migration ───────────────────────────────────────────────────────
-    # Tabloları oluşturur, eksik kolonları ekler, guild config'i yazar.
-    # Her açılışta çalışır — idempotent, güvenli.
+    # Creates tables, adds missing columns, seeds guild config.
+    # Runs on every start — idempotent and safe.
     from db.migrations import run_migrations
     await run_migrations(app_state.db)
+
+    # ── Guarantee stream_history exists ──────────────────────────────────────
+    # Safety net: migration may be skipped on first deploy or schema drift.
+    try:
+        async with app_state.db.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS stream_history (
+                    id            BIGSERIAL   PRIMARY KEY,
+                    twitch_login  TEXT        NOT NULL,
+                    guild_id      BIGINT      NOT NULL,
+                    title         TEXT,
+                    game_name     TEXT,
+                    peak_viewers  INTEGER     DEFAULT 0,
+                    started_at    TIMESTAMPTZ,
+                    ended_at      TIMESTAMPTZ,
+                    duration_secs INTEGER     DEFAULT 0
+                );
+            """)
+        logger.info("stream_history table verified")
+    except Exception as e:
+        logger.warning(f"stream_history table check failed: {e}")
 
     # ── Redis ────────────────────────────────────────────────────
     cache: CacheManager | None = None
