@@ -65,6 +65,9 @@ def _start_key(login: str) -> str:  return f"stream:start:{login}"
 
 def _get_target_channel(guild: discord.Guild, config: dict, login: str) -> Optional[discord.TextChannel]:
     """Returns the correct announcement channel based on streamer login."""
+    if not config:
+        return None
+        
     if login == KEVKEVVY_LOGIN:
         ch = guild.get_channel(KEVKEVVY_CHANNEL_ID)
         if ch:
@@ -267,10 +270,16 @@ async def handle_stream_offline(bot, event: dict) -> None:
 
     for guild in bot.guilds:
         config = await get_guild_config(guild.id)
+        if not config:
+            continue
+            
         ch = _get_target_channel(guild, config, login)
         if ch:
             await redis_client.delete(_msg_key(login, guild.id))
-            await ch.send(embed=embed)
+            try:
+                await ch.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Failed to send offline notification to guild {guild.id}: {e}")
 
 
 async def handle_channel_update(bot, event: dict) -> None:
@@ -293,6 +302,10 @@ async def handle_channel_update(bot, event: dict) -> None:
     if changes:
         await redis_client.set(_meta_key(login), json.dumps(new_stream), ttl=META_TTL)
         for guild in bot.guilds:
-            ch = _get_target_channel(guild, await get_guild_config(guild.id), login)
+            config = await get_guild_config(guild.id)
+            if not config:
+                continue
+                
+            ch = _get_target_channel(guild, config, login)
             if ch:
                 await ch.send(embed=_change_embed(login, user_name, changes))
