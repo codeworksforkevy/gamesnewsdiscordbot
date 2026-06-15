@@ -1,22 +1,16 @@
-import discord
-from discord import app_commands
+# commands/register.py
 
 from .timestamp import register_timestamp
 from .convert   import register_convert
 from .poll      import register_poll
 from .reminder  import register_reminder
 
-
 async def register_utilities(bot):
-
-    util_group = app_commands.Group(
-        name="util",
-        description="🛠️ Handy tools for everyday Discord use",
-    )
-
+    util_group = app_commands.Group(name="util", description="🛠️ Handy tools for everyday use")
+    
     register_timestamp(util_group)
     register_convert(util_group)
     register_poll(util_group)
     register_reminder(util_group)
-
+    
     bot.tree.add_command(util_group)
