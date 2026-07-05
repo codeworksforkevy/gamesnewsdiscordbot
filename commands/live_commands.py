@@ -30,7 +30,6 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
     
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        # Prompt tailored for the desired Emoji UX and tone
         prompt = (
             f"Twitch streamer {streamer_name} was live for {duration_mins} minutes and "
             f"just went offline. Write a very short (1-2 sentences) farewell message for their Discord community "
@@ -38,7 +37,7 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
             f"Provide only the text, no quotes."
         )
         
-        # Run the synchronous AI call in an executor to avoid blocking the event loop
+        # Execute synchronous AI call in an executor thread to avoid event loop blocking
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, model.generate_content, prompt)
         return response.text.strip()
@@ -135,6 +134,9 @@ class LiveCommandsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # Base application command group for /live
+    live_group = app_commands.Group(name="live", description="Twitch stream subscription and management tools")
+
     @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
         """Handles the stream offline event, fetches VOD, and clears cache."""
@@ -168,6 +170,139 @@ class LiveCommandsCog(commands.Cog):
         except Exception as e:
             logger.error(f"Failed to delete Redis key {msg_key}: {e}")
 
+    # ──────────────────────────────────────────────────────────
+    # SUBCOMMANDS RESTORATION (/live ...)
+    # ──────────────────────────────────────────────────────────
+
+    @live_group.command(name="add", description="Add a Twitch streamer to the system tracking list.")
+    @app_commands.describe(username="The Twitch login username of the streamer to add")
+    async def live_add(self, interaction: discord.Interaction, username: str):
+        """Validates the streamer via Twitch API and records them into the DB."""
+        await interaction.response.defer()
+        username_clean = username.lower().strip()
+        try:
+            twitch_api = self.bot.app_state.twitch_api
+            # Handle standard profile resolution
+            if hasattr(twitch_api, "get_user"):
+                user_data = await twitch_api.get_user(username_clean)
+            else:
+                users = await twitch_api.get_users_by_logins([username_clean])
+                user_data = users.get(username_clean)
+
+            if not user_data:
+                await interaction.followup.send(f"❌ Twitch user `{username_clean}` could not be verified or found.")
+                return
+
+            display_name = user_data.get("display_name", username_clean)
+            pool = self.bot.app_state.db.pool
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO streamers (twitch_login, is_live) VALUES ($1, FALSE) "
+                    "ON CONFLICT (twitch_login) DO NOTHING",
+                    username_clean
+                )
+            
+            await interaction.followup.send(f"✅ Successfully added **{display_name}** (`{username_clean}`) to the tracking list!")
+        except Exception as e:
+            logger.error(f"Failed to add streamer {username_clean}: {e}", exc_info=True)
+            await interaction.followup.send("❌ An unexpected database error occurred while adding the record.")
+
+    @live_group.command(name="remove", description="Remove a Twitch streamer from the system tracking list.")
+    @app_commands.describe(username="The Twitch login username of the streamer to remove")
+    async def live_remove(self, interaction: discord.Interaction, username: str):
+        """Removes a streamer from global tracking and purges active cache contexts."""
+        await interaction.response.defer()
+        username_clean = username.lower().strip()
+        try:
+            pool = self.bot.app_state.db.pool
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM streamers WHERE twitch_login = $1", username_clean)
+            
+            # Clean up active state and announcement context mapping
+            msg_key = f"stream:msg:{username_clean}:{interaction.guild_id}"
+            status_key = f"stream:status:{username_clean}"
+            await self.bot.app_state.redis.delete(msg_key)
+            await self.bot.app_state.redis.delete(status_key)
+
+            await interaction.followup.send(f"🗑️ Removed `{username_clean}` from tracked profiles and cleared related server caches.")
+        except Exception as e:
+            logger.error(f"Failed to remove streamer {username_clean}: {e}", exc_info=True)
+            await interaction.followup.send("❌ An operational error occurred during deletion.")
+
+    @live_group.command(name="list", description="List all Twitch streamers currently registered in the database.")
+    async def live_list(self, interaction: discord.Interaction):
+        """Fetches and arrays all tracking registrations alongside their real-time state flags."""
+        await interaction.response.defer()
+        try:
+            pool = self.bot.app_state.db.pool
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT twitch_login, is_live FROM streamers ORDER BY twitch_login ASC")
+            
+            if not rows:
+                await interaction.followup.send("💤 The subscription database is completely empty.")
+                return
+
+            embed = discord.Embed(
+                title="📡 Monitored Twitch Channels",
+                color=0xFFB6C1,
+                timestamp=discord.utils.utcnow()
+            )
+            
+            lines = [
+                f"• [{row['twitch_login']}](https://www.twitch.tv/{row['twitch_login']}) — "
+                f"{'🔴 **LIVE**' if row['is_live'] else '💤 Offline'}"
+                for row in rows
+            ]
+            
+            embed.description = "\n".join(lines)
+            embed.set_footer(text=f"Total Registrations: {len(rows)}")
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Failed to build tracking overview array list: {e}", exc_info=True)
+            await interaction.followup.send("❌ Internal tracking compilation query failed.")
+
+    @live_group.command(name="force", description="Force an immediate live announcement card bypass for an active channel.")
+    @app_commands.describe(username="The target Twitch login name to pull and execute an announcement for")
+    async def live_force(self, interaction: discord.Interaction, username: str):
+        """Bypasses automated eventsub routines to post an explicit live stream status card manually."""
+        await interaction.response.defer()
+        username_clean = username.lower().strip()
+        try:
+            twitch_api = self.bot.app_state.twitch_api
+            stream_data = await twitch_api.get_stream(username_clean)
+            
+            if hasattr(twitch_api, "get_user"):
+                user_data = await twitch_api.get_user(username_clean)
+            else:
+                users = await twitch_api.get_users_by_logins([username_clean])
+                user_data = users.get(username_clean)
+
+            if not stream_data or not user_data:
+                await interaction.followup.send(f"❌ `{username_clean}` is either offline or failed api evaluation lookup.")
+                return
+
+            embed = build_live_embed(stream_data, user_data)
+            from db.guild_settings import get_guild_config
+            config = await get_guild_config(interaction.guild_id)
+            announce_channel_id = config.get("announce_channel_id")
+            
+            if announce_channel_id:
+                channel = self.bot.get_channel(announce_channel_id)
+                if channel:
+                    sent_msg = await channel.send(embed=embed)
+                    msg_key = f"stream:msg:{username_clean}:{interaction.guild_id}"
+                    await self.bot.app_state.redis.set(msg_key, str(sent_msg.id))
+                    await interaction.followup.send(f"🚀 Live feed bypass executed for **{username_clean}** in <#{announce_channel_id}>.")
+                    return
+            
+            await interaction.followup.send("❌ Target destination communication pipeline channel context missing for this server.")
+        except Exception as e:
+            logger.error(f"Bypass injection sequence failed for {username_clean}: {e}", exc_info=True)
+            await interaction.followup.send("❌ Error forcing stream validation context processing.")
+
+    # ──────────────────────────────────────────────────────────
+    # LIVE STATS BACKWARD COMPATIBILITY
+    # ──────────────────────────────────────────────────────────
     @app_commands.command(name="live_stats", description="Scans for active streams and posts any missed announcements.")
     async def live_stats(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=False)
@@ -206,11 +341,11 @@ class LiveCommandsCog(commands.Cog):
             logger.error(f"live_stats failed: {e}", exc_info=True)
             await interaction.followup.send("❌ An error occurred during the scan.")
 
-# Required entry point for the bot loader (Fixed: Accepts 3 arguments)
+# Required entry point for the injection framework loader
 async def register(bot, app_state, session):
     await bot.add_cog(LiveCommandsCog(bot))
-    logger.info("commands.live_commands loaded successfully.")
+    logger.info("commands.live_commands group pipeline loaded successfully.")
 
 async def setup(bot):
     await bot.add_cog(LiveCommandsCog(bot))
-    logger.info("LiveCommandsCog loaded successfully.")
+    logger.info("LiveCommandsCog initialized successfully.")
