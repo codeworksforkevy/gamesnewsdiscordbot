@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 
 # Ensure you have 'google-generativeai' installed (pip install google-generativeai)
+# NOTE: This library is deprecated. Please migrate to 'google-genai' as per your logs.
 try:
     import google.generativeai as genai
     HAS_AI = True
@@ -351,3 +352,8 @@ async def register(bot, app_state, session):
         logger.info("commands.live_commands group pipeline loaded successfully.")
     else:
         logger.info("LiveCommandsCog already loaded, skipping registration.")
+
+# FIXED: Required setup function for discord.py extension loading
+async def setup(bot):
+    await bot.add_cog(LiveCommandsCog(bot))
+    logger.info("commands.live_commands extension setup complete.")
