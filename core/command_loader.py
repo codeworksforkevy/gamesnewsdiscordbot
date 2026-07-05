@@ -7,15 +7,6 @@ Each command file must expose:
     async def register(bot, app_state, session) -> None
 
 Files starting with '_' are skipped (e.g. __init__.py).
-Errors in individual modules are logged in full but do NOT crash
-the loader — the bot starts with whatever commands loaded successfully.
-
-Improvements over original (which was already well-written):
-- Registers successfully loaded modules into app_state.registry
-  so the /debug command can surface what's loaded
-- Records errors in app_state.registry.register_error() too
-- session is forwarded as a keyword argument so commands that
-  don't declare it in their signature don't crash on unexpected arg
 """
 
 import importlib
@@ -28,7 +19,6 @@ logger = logging.getLogger("command-loader")
 
 COMMANDS_PATH = "commands"
 
-
 async def load_all_commands(bot, app_state, session=None) -> None:
     """
     Discovers and loads every command module in the commands/ directory.
@@ -37,20 +27,18 @@ async def load_all_commands(bot, app_state, session=None) -> None:
     loaded: list[str] = []
     failed: list[str] = []
 
-    try:
-        filenames = sorted(os.listdir(COMMANDS_PATH))
-    except FileNotFoundError:
-        logger.error(
-            f"Commands folder '{COMMANDS_PATH}' not found — no commands loaded"
-        )
+    if not os.path.exists(COMMANDS_PATH):
+        logger.error(f"Commands folder '{COMMANDS_PATH}' not found — no commands loaded")
         return
+
+    filenames = sorted(os.listdir(COMMANDS_PATH))
 
     for filename in filenames:
         if not filename.endswith(".py") or filename.startswith("_"):
             continue
 
         module_name = f"{COMMANDS_PATH}.{filename[:-3]}"
-        short_name  = filename[:-3]
+        short_name = filename[:-3]
 
         try:
             # Reload if already cached (supports hot-redeploy on Railway)
@@ -67,7 +55,7 @@ async def load_all_commands(bot, app_state, session=None) -> None:
             loaded.append(module_name)
 
             # Track in registry if available
-            if app_state.registry:
+            if hasattr(app_state, 'registry') and app_state.registry:
                 app_state.registry.register(short_name, module_name)
 
             logger.info(f"Loaded command module: {module_name}")
@@ -76,7 +64,7 @@ async def load_all_commands(bot, app_state, session=None) -> None:
             failed.append(module_name)
 
             # Track error in registry if available
-            if app_state.registry:
+            if hasattr(app_state, 'registry') and app_state.registry:
                 app_state.registry.register_error(module_name, e)
 
             logger.error(
@@ -86,13 +74,7 @@ async def load_all_commands(bot, app_state, session=None) -> None:
             )
 
     # ── Summary ────────────────────────────────────────────────
-    logger.info(
-        "Command loading complete",
-        extra={"extra_data": {
-            "loaded": len(loaded),
-            "failed": len(failed),
-        }},
-    )
+    logger.info("Command loading complete")
 
     if loaded:
         logger.info(f"Loaded: {', '.join(loaded)}")
