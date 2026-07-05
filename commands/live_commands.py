@@ -1,8 +1,3 @@
-Here is your fully updated `live_commands.py` file. I have migrated the AI logic to the new `google.genai` library, maintained your threading pattern to keep the bot responsive, and preserved the rest of your structure exactly as you had it.
-
-**Note:** Ensure your environment has the `GEMINI_API_KEY` variable set, as the new client requires it to initialize.
-
-```python
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -373,5 +368,3 @@ async def register(bot, app_state, session):
 async def setup(bot):
     await bot.add_cog(LiveCommandsCog(bot))
     logger.info("commands.live_commands extension setup complete.")
-
-```
