@@ -1,6 +1,3 @@
-
-# commands/live_commands.py
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -52,10 +49,10 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
 
 def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     """Constructs the embed sent when a streamer goes live."""
-    login      = stream.get("user_login") or user.get("login", "unknown")
-    name       = stream.get("user_name")  or user.get("display_name", login)
-    title      = stream.get("title", "") or ""
-    game       = stream.get("game_name", "") or "Just Chatting"
+    login    = stream.get("user_login") or user.get("login", "unknown")
+    name     = stream.get("user_name")  or user.get("display_name", login)
+    title    = stream.get("title", "") or ""
+    game     = stream.get("game_name", "") or "Just Chatting"
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
@@ -146,12 +143,10 @@ class LiveCommandsCog(commands.Cog):
     @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
         """Handles the stream offline event, fetches VOD, and clears cache."""
-        # Wait slightly to give Twitch time to process and index the VOD archive
         await asyncio.sleep(15) 
         
         vod_url = None
         try:
-            # Attempt to fetch the latest archived video (VOD) for the user
             if hasattr(self.bot.app_state.twitch_api, "get_videos"):
                 videos = await self.bot.app_state.twitch_api.get_videos(user_id=user_id, video_type="archive", first=1)
                 if videos:
@@ -180,14 +175,12 @@ class LiveCommandsCog(commands.Cog):
             logger.error(f"Failed to delete Redis key {msg_key}: {e}")
 
     # ──────────────────────────────────────────────────────────
-    # SUBCOMMANDS RESTORATION (/live ...)
+    # SUBCOMMANDS
     # ──────────────────────────────────────────────────────────
 
     @live_group.command(name="add", description="Add a Twitch streamer to the system tracking list.")
     @app_commands.describe(username="The Twitch login username of the streamer to add")
     async def live_add(self, interaction: discord.Interaction, username: str):
-        """Validates the streamer via Twitch API and records them into the DB."""
-        # ephemeral=True ensures only the command caller sees this response
         await interaction.response.defer(ephemeral=True)
         username_clean = username.lower().strip()
         try:
@@ -219,7 +212,6 @@ class LiveCommandsCog(commands.Cog):
     @live_group.command(name="remove", description="Remove a Twitch streamer from the system tracking list.")
     @app_commands.describe(username="The Twitch login username of the streamer to remove")
     async def live_remove(self, interaction: discord.Interaction, username: str):
-        """Removes a streamer from global tracking and purges active cache contexts."""
         await interaction.response.defer(ephemeral=True)
         username_clean = username.lower().strip()
         try:
@@ -239,7 +231,6 @@ class LiveCommandsCog(commands.Cog):
 
     @live_group.command(name="list", description="List all Twitch streamers currently registered in the database.")
     async def live_list(self, interaction: discord.Interaction):
-        """Fetches and arrays all tracking registrations alongside their real-time state flags."""
         await interaction.response.defer(ephemeral=True)
         try:
             pool = self.bot.app_state.db.pool
@@ -272,12 +263,10 @@ class LiveCommandsCog(commands.Cog):
     @live_group.command(name="force", description="Force an immediate live announcement card bypass for an active channel.")
     @app_commands.describe(username="The target Twitch login name to pull and execute an announcement for")
     async def live_force(self, interaction: discord.Interaction, username: str):
-        """Bypasses automated eventsub routines to post an explicit live stream status card manually."""
         await interaction.response.defer(ephemeral=True)
         username_clean = username.lower().strip()
         try:
             twitch_api = self.bot.app_state.twitch_api
-            # FIXED: Updated get_stream to get_stream_metadata
             stream_data = await twitch_api.get_stream_metadata(username_clean)
             
             if hasattr(twitch_api, "get_user"):
@@ -309,14 +298,10 @@ class LiveCommandsCog(commands.Cog):
             logger.error(f"Bypass injection sequence failed for {username_clean}: {e}", exc_info=True)
             await interaction.followup.send("❌ Error forcing stream validation context processing.")
 
-    # ──────────────────────────────────────────────────────────
-    # LIVE STATS BACKWARD COMPATIBILITY
-    # ──────────────────────────────────────────────────────────
-    
     @app_commands.command(name="live_stats", description="Scans for active streams and posts any missed announcements.")
-    @app_commands.default_permissions(administrator=True) # Locked to Administrators
+    @app_commands.default_permissions(administrator=True)
     async def live_stats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True) # Changed to True
+        await interaction.response.defer(ephemeral=True)
         try:
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
@@ -329,7 +314,6 @@ class LiveCommandsCog(commands.Cog):
                 has_posted = await self.bot.app_state.redis.get(msg_key)
                 
                 if not has_posted:
-                    # FIXED: Updated get_stream to get_stream_metadata
                     stream_data = await self.bot.app_state.twitch_api.get_stream_metadata(login)
                     
                     if hasattr(self.bot.app_state.twitch_api, "get_user"):
@@ -359,13 +343,11 @@ class LiveCommandsCog(commands.Cog):
             logger.error(f"live_stats failed: {e}", exc_info=True)
             await interaction.followup.send("❌ An error occurred during the scan.")
 
-
 # Required entry point for the injection framework loader
 async def register(bot, app_state, session):
-    await bot.add_cog(LiveCommandsCog(bot))
-    logger.info("commands.live_commands group pipeline loaded successfully.")
-
-async def setup(bot):
-    await bot.add_cog(LiveCommandsCog(bot))
-    logger.info("LiveCommandsCog initialized successfully.")
-
+    # Only register if the cog isn't already loaded
+    if bot.get_cog("LiveCommandsCog") is None:
+        await bot.add_cog(LiveCommandsCog(bot))
+        logger.info("commands.live_commands group pipeline loaded successfully.")
+    else:
+        logger.info("LiveCommandsCog already loaded, skipping registration.")
