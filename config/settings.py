@@ -24,6 +24,7 @@ class DatabaseConfig:
 @dataclass
 class RedisConfig:
     url: str
+    enabled: bool = True  # FIX: Added the missing enabled attribute
     max_connections: int = 10
     socket_timeout: int = 5
 
@@ -95,8 +96,10 @@ def load_config() -> AppConfig:
     db_url = safe_get(get_env, "DATABASE_URL")
     database = DatabaseConfig(url=db_url) if db_url else None
 
+    # FIX: Initialize RedisConfig with the new enabled property
     redis_url = safe_get(get_env, "REDIS_URL")
-    redis = RedisConfig(url=redis_url) if redis_url else None
+    redis_enabled = get_env_bool("REDIS_ENABLED", True) 
+    redis = RedisConfig(url=redis_url, enabled=redis_enabled) if redis_url else None
 
     bot_token = safe_get(get_env, "DISCORD_TOKEN")
     bot = BotConfig(
