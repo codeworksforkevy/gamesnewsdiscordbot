@@ -30,7 +30,7 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
     
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        # Prompt designed to keep the farewell message friendly and tech-themed
+        # Prompt tailored for the desired Emoji UX and tone
         prompt = (
             f"Twitch streamer {streamer_name} was live for {duration_mins} minutes and "
             f"just went offline. Write a very short (1-2 sentences) farewell message for their Discord community "
@@ -38,7 +38,7 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
             f"Provide only the text, no quotes."
         )
         
-        # Execute synchronous AI call in a thread pool to avoid blocking the bot's event loop
+        # Run the synchronous AI call in an executor to avoid blocking the event loop
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, model.generate_content, prompt)
         return response.text.strip()
@@ -52,10 +52,10 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
 
 def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     """Constructs the embed sent when a streamer goes live."""
-    login    = stream.get("user_login") or user.get("login", "unknown")
-    name     = stream.get("user_name")  or user.get("display_name", login)
-    title    = stream.get("title", "") or ""
-    game     = stream.get("game_name", "") or "Just Chatting"
+    login      = stream.get("user_login") or user.get("login", "unknown")
+    name       = stream.get("user_name")  or user.get("display_name", login)
+    title      = stream.get("title", "") or ""
+    game       = stream.get("game_name", "") or "Just Chatting"
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
@@ -92,7 +92,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     raw_thumb = stream.get("thumbnail_url", "")
     thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
     if thumbnail:
-        # Appending time prevents Discord from caching an old thumbnail
         embed.set_image(url=f"{thumbnail}?v={int(time.time())}")
 
     embed.set_footer(text=f"twitch.tv/{login}")
@@ -120,17 +119,9 @@ async def build_offline_embed(
         embed.set_thumbnail(url=icon_url)
 
     if vod_url:
-        embed.add_field(
-            name="📼 Missed it?",
-            value=f"💿 [Watch the past broadcast (VOD) here]({vod_url})",
-            inline=False
-        )
+        embed.add_field(name="📼 Missed it?", value=f"💿 [Watch the past broadcast (VOD) here]({vod_url})", inline=False)
     else:
-        embed.add_field(
-            name="📼 VOD",
-            value=f"💿 [All Videos](https://www.twitch.tv/{login}/videos)",
-            inline=False
-        )
+        embed.add_field(name="📼 VOD", value=f"💿 [All Videos](https://www.twitch.tv/{login}/videos)", inline=False)
 
     embed.set_footer(text=f"Stream ended • twitch.tv/{login}")
     embed.timestamp = datetime.now(timezone.utc)
@@ -147,7 +138,7 @@ class LiveCommandsCog(commands.Cog):
     @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
         """Handles the stream offline event, fetches VOD, and clears cache."""
-        await asyncio.sleep(15) # Wait for VOD processing
+        await asyncio.sleep(15) 
         
         vod_url = None
         try:
@@ -179,7 +170,6 @@ class LiveCommandsCog(commands.Cog):
 
     @app_commands.command(name="live_stats", description="Scans for active streams and posts any missed announcements.")
     async def live_stats(self, interaction: discord.Interaction):
-        """Manually checks DB for active streams and syncs Discord announcements."""
         await interaction.response.defer(ephemeral=False)
         try:
             pool = self.bot.app_state.db.pool
@@ -211,14 +201,16 @@ class LiveCommandsCog(commands.Cog):
                 await interaction.followup.send(f"📡 Scan complete. Sent AI-supported announcements for **{recovered_count}** missed stream(s)!")
             else:
                 await interaction.followup.send("✅ All active streams are already announced. No missed streams found.")
+
         except Exception as e:
             logger.error(f"live_stats failed: {e}", exc_info=True)
             await interaction.followup.send("❌ An error occurred during the scan.")
 
-# Required entry point for the bot loader
-async def register(bot):
+# Required entry point for the bot loader (Fixed: Accepts 3 arguments)
+async def register(bot, app_state, session):
     await bot.add_cog(LiveCommandsCog(bot))
     logger.info("commands.live_commands loaded successfully.")
 
 async def setup(bot):
-    await register(bot)
+    await bot.add_cog(LiveCommandsCog(bot))
+    logger.info("LiveCommandsCog loaded successfully.")
