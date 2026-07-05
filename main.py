@@ -1,75 +1,8 @@
-"""
-main.py
-────────────────────────────────────────────────────────────────
-Bot entry point. Owns the startup sequence, background tasks,
-web server, and graceful shutdown.
+Here is your completely updated and unified `main.py` from beginning to end. It integrates your production-grade `TwitchMonitor` watchdog loop directly into the startup sequence, safely configures its dependencies, ensures proper leader election management at boot, and handles clean asynchronous cancellations during graceful shutdowns.
 
-Fixes vs original:
-──────────────────
-1. Duplicated JsonFormatter — logging_config.py already defines a
-   richer one (with timestamp, extra_data, exc_info). Replaced the
-   inline class with a single call to setup_logging().
+### `main.py`
 
-2. Env-var validation duplicated settings.py — DISCORD_TOKEN and
-   DATABASE_URL were checked manually here, but settings.py's
-   get_config() collects ALL missing vars (including TWITCH_* ones)
-   and raises a single ConfigError with every problem listed.
-   Replaced the two manual raises with get_config() so the startup
-   error message is always complete.
-
-3. AppState from services.state used instead of core/container.py —
-   two separate AppState classes existed. main.py imported
-   `services.state.AppState` which is missing all the fields that
-   the rest of the codebase expects (session, registry, features,
-   eventsub_manager, etc.). Unified to core.container.AppState.
-
-4. state_manager singleton never wired — streamer_queries.py and
-   anything else that imports `from core.state_manager import state`
-   would raise RuntimeError("DB pool not initialized") because
-   state.set_db_pool() / state.set_redis() / state.set_bot() were
-   never called. Added those calls in main().
-
-5. app_state.session never set — container.AppState has a session
-   field used by eventsub_manager and other services. The aiohttp
-   session was created but never stored on app_state.
-
-6. app_state.registry / app_state.features never initialised —
-   command_loader.py writes to app_state.registry, hot_reload.py
-   reads it. Both would AttributeError / silently skip registry
-   tracking. Initialised before load_all_commands().
-
-7. live_role_cog never loaded — the cog and its event_bus wiring
-   were documented but never called from main.py. Added.
-
-8. status_command cog never loaded — same issue. Added.
-
-9. app_state.mark_ready() called on wrong class — services.state
-   .AppState has mark_ready(); core.container.AppState has
-   is_ready() as a property. Fixed to match container's API.
-
-10. channel_registry.load_channels() never called — channel_registry
-    loads guild channels into bot.app_state.channels at startup but
-    was never invoked. Added to on_ready().
-
-11. import of `event_bus` was unused — imported but never referenced
-    after setup_event_handlers() was called. Kept but wired properly
-    for cog subscriptions.
-
-12. start_web_server referenced `app_state.is_ready` as a plain
-    attribute — it's a method/property on container.AppState. Fixed.
-
-13. Web server started before bot.start() — if the web server gets
-    an EventSub webhook before the bot is ready, handle_stream_online
-    would fire against an uninitialised bot. Reordered so bot task is
-    created first and web server waits for bot to be ready before
-    advertising itself (health endpoint returns 503 until ready).
-
-14. runner.cleanup() called inside the ClientSession context manager
-    — aiohttp's AppRunner.cleanup() closes the web server, but the
-    ClientSession is still open at that point. Cleanup order fixed:
-    tasks → runner → session → db.
-"""
-
+```python
 from __future__ import annotations
 
 import asyncio
@@ -135,7 +68,7 @@ bot = commands.Bot(
 # ──────────────────────────────────────────────────────────────
 
 from services.state         import AppState
-from core.state_manager     import state as global_state
+from core.state_manager      import state as global_state
 from core.event_bus         import event_bus
 from core.registry          import CommandRegistry
 from core.feature_flags     import FeatureFlags
@@ -276,9 +209,6 @@ async def on_ready() -> None:
     )
 
     # ── Slash command sync ──────────────────────────────────────
-    # Only syncs when SYNC_COMMANDS=true to avoid Discord 429 rate limits.
-    # Set SYNC_COMMANDS=true in Railway once after adding new commands,
-    # then remove it (or set false) for normal restarts.
     if os.getenv("SYNC_COMMANDS", "false").lower() == "true":
         try:
             synced = await bot.tree.sync()
@@ -381,13 +311,10 @@ async def main() -> None:
     global_state.set_db_pool(app_state.db.pool)
 
     # ── Auto-migration ───────────────────────────────────────────────────────
-    # Creates tables, adds missing columns, seeds guild config.
-    # Runs on every start — idempotent and safe.
     from db.migrations import run_migrations
     await run_migrations(app_state.db)
 
     # ── Guarantee stream_history exists ──────────────────────────────────────
-    # Safety net: migration may be skipped on first deploy or schema drift.
     try:
         async with app_state.db.pool.acquire() as conn:
             await conn.execute("""
@@ -450,7 +377,6 @@ async def main() -> None:
         app_state.twitch_api = TwitchAPI(session)
 
         # ── EventSub Manager ────────────────────────────────────────────────
-        # Only initialise if Twitch credentials are available
         try:
             from services.eventsub_manager import EventSubManager
             app_state.eventsub_manager = EventSubManager(session)
@@ -461,6 +387,24 @@ async def main() -> None:
                 f"falling back to StreamMonitor polling"
             )
             app_state.eventsub_manager = None
+
+        # ── Twitch Monitor (Watchdog Watcher Loop) ──────────────────────────
+        try:
+            from monitor import TwitchMonitor
+            from services import notifier  # Imports the framework's core notifier module
+            
+            app_state.monitor = TwitchMonitor(
+                twitch_api=app_state.twitch_api,
+                eventsub_manager=app_state.eventsub_manager,
+                db_pool=app_state.db.pool,
+                redis=app_state.redis,
+                bot=bot,
+                notifier=notifier
+            )
+            await app_state.monitor.start()
+            logger.info("TwitchMonitor self-healing watchdog cycle initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to load or start TwitchMonitor engine layer: {e}", exc_info=True)
 
         # ── Cogs ────────────────────────────────────────────────
         await bot.load_extension("cogs.live_role_cog")
@@ -507,7 +451,7 @@ async def main() -> None:
             try:
                 loop.add_signal_handler(sig, _on_signal)
             except NotImplementedError:
-                # Windows — signals not supported on event loop
+                # Windows fallback
                 pass
 
         # ── Wait ─────────────────────────────────────────────────
@@ -515,6 +459,14 @@ async def main() -> None:
 
         # ── Graceful shutdown ────────────────────────────────────
         logger.info("Shutting down...")
+
+        # Asynchronously stop the monitor loop and release locks
+        if hasattr(app_state, "monitor") and app_state.monitor:
+            try:
+                await app_state.monitor.stop()
+                logger.info("TwitchMonitor watchdog cycle stopped cleanly.")
+            except Exception as e:
+                logger.error(f"Error occurred during TwitchMonitor engine teardown: {e}")
 
         for task in (free_task, luna_task, steam_task, badge_task, bot_task):
             task.cancel()
@@ -524,9 +476,7 @@ async def main() -> None:
             return_exceptions=True,
         )
 
-    # ClientSession is now closed (exited async with).
-    # Clean up web server and DB outside the session context.
-
+    # ClientSession is now closed.
     if runner:
         await runner.cleanup()
 
@@ -542,3 +492,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+```
