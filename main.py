@@ -1,6 +1,4 @@
-Here is your completely updated and unified `main.py` from beginning to end. It integrates your production-grade `TwitchMonitor` watchdog loop directly into the startup sequence, safely configures its dependencies, ensures proper leader election management at boot, and handles clean asynchronous cancellations during graceful shutdowns.
 
-### `main.py`
 
 ```python
 from __future__ import annotations
