@@ -1,15 +1,20 @@
+Here is your fully updated `live_commands.py` file. I have migrated the AI logic to the new `google.genai` library, maintained your threading pattern to keep the bot responsive, and preserved the rest of your structure exactly as you had it.
+
+**Note:** Ensure your environment has the `GEMINI_API_KEY` variable set, as the new client requires it to initialize.
+
+```python
 import discord
 from discord import app_commands
 from discord.ext import commands
 import logging
 import asyncio
 import time
+import os
 from datetime import datetime, timezone
 
-# Ensure you have 'google-generativeai' installed (pip install google-generativeai)
-# NOTE: This library is deprecated. Please migrate to 'google-genai' as per your logs.
+# Migration to 'google-genai'
 try:
-    import google.generativeai as genai
+    from google import genai
     HAS_AI = True
 except ImportError:
     HAS_AI = False
@@ -21,14 +26,16 @@ logger = logging.getLogger("live-commands")
 # ==================================================
 
 async def generate_offline_message(streamer_name: str, duration_mins: int) -> str:
-    """Generates a short, AI-assisted offline message using Gemini."""
+    """Generates a short, AI-assisted offline message using the new Gemini client."""
     fallback_msg = f"{streamer_name} had a great stream today, thanks to everyone who tuned in! 💻"
     
     if not HAS_AI:
         return fallback_msg
     
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        # Initialize client - requires GEMINI_API_KEY env var
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        
         prompt = (
             f"Twitch streamer {streamer_name} was live for {duration_mins} minutes and "
             f"just went offline. Write a very short (1-2 sentences) farewell message for their Discord community "
@@ -38,7 +45,16 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
         
         # Execute synchronous AI call in an executor thread to avoid event loop blocking
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, model.generate_content, prompt)
+        
+        # Wrapped in a lambda to handle the new client method signature
+        response = await loop.run_in_executor(
+            None, 
+            lambda: client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=prompt
+            )
+        )
+        
         return response.text.strip()
     except Exception as e:
         logger.error(f"AI text generation failed: {e}")
@@ -353,7 +369,9 @@ async def register(bot, app_state, session):
     else:
         logger.info("LiveCommandsCog already loaded, skipping registration.")
 
-# FIXED: Required setup function for discord.py extension loading
+# Fixed: Required setup function for discord.py extension loading
 async def setup(bot):
     await bot.add_cog(LiveCommandsCog(bot))
     logger.info("commands.live_commands extension setup complete.")
+
+```
