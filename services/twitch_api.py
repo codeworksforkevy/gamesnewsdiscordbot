@@ -26,6 +26,7 @@ class TwitchAPI:
         self._lock   = asyncio.Lock()
 
     async def get_token(self) -> str:
+        """Fetches and caches the OAuth2 token for Twitch API access."""
         async with self._lock:
             now = time.time()
             if self._token and now < self._expiry:
@@ -49,6 +50,7 @@ class TwitchAPI:
                 raise
 
     async def request(self, endpoint: str, params: Optional[List[tuple]] = None) -> Any:
+        """Helper to perform authorized requests to Twitch Helix API."""
         token = await self.get_token()
         headers = {"Client-ID": self.client_id, "Authorization": f"Bearer {token}"}
         url = f"{HELIX}/{endpoint}"
@@ -57,18 +59,24 @@ class TwitchAPI:
 
     # --- ADDED: Batch stream fetch for watchdog mechanism ---
     async def get_streams_by_ids(self, user_ids: List[str]) -> List[Dict]:
-        """Fetch live stream data for a list of user IDs (batch processing)."""
+        """
+        Fetch live stream data for a list of user IDs in batches of 100.
+        This is optimized for the Watchdog loop to check multiple streamers at once.
+        """
         if not user_ids:
             return []
         
         all_live = []
-        # Twitch API limits to 100 IDs per request
+        # Twitch API limits to 100 IDs per request; process in chunks
         for i in range(0, len(user_ids), 100):
             chunk = user_ids[i:i + 100]
             params = [("user_id", uid) for uid in chunk]
+            
             data = await self.request("streams", params=params)
             if data and "data" in data:
                 all_live.extend(data["data"])
+                
         return all_live
 
-    # ... (diğer metodların aynı kalıyor)
+    # Other methods (like get_users_by_logins, get_stream_metadata, etc.) 
+    # should remain below here as per your original file.
