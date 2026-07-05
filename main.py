@@ -1,6 +1,3 @@
-Here is the complete `main.py` file with the `await bot.load_extension("commands.live_commands")` line added to the startup sequence.
-
-```python
 from __future__ import annotations
 
 import asyncio
@@ -210,4 +207,3 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 
-```
