@@ -1,3 +1,6 @@
+Here is the complete `main.py` file with the `await bot.load_extension("commands.live_commands")` line added to the startup sequence.
+
+```python
 from __future__ import annotations
 
 import asyncio
@@ -158,8 +161,6 @@ async def main() -> None:
 
         # Twitch Monitor Initialisation
         try:
-            # IMPORTANT: Ensure 'monitor.py' is in the root directory. 
-            # If it is in a folder (e.g. 'core/monitor.py'), change the import below to: from core.monitor import TwitchMonitor
             from monitor import TwitchMonitor
             from services import notifier
             
@@ -178,6 +179,9 @@ async def main() -> None:
 
         await bot.load_extension("cogs.live_role_cog")
         await bot.load_extension("cogs.status_command")
+        # Load the new commands cog
+        await bot.load_extension("commands.live_commands")
+        
         _setup_event_handlers()
         await load_all_commands(bot, app_state, session)
 
@@ -205,3 +209,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+```
