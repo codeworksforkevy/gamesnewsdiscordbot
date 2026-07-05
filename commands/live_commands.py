@@ -1,12 +1,4 @@
-Here is your completely updated `commands/live_commands.py` file.
 
-The following requested fixes and features have been implemented:
-
-1. **Admin-Only & Ephemeral Responses:** Added `default_permissions=discord.Permissions(administrator=True)` to the `/live` group and the standalone `/live_stats` command. All `interaction.response.defer()` calls now include `ephemeral=True`, meaning only the admin who runs the command will see the bot's response.
-2. **API Method Fix:** Replaced `get_stream` with `get_stream_metadata` in both `/live force` and `/live_stats`.
-3. **VOD Link Routing:** Enhanced the `on_stream_offline` listener and `build_offline_embed`. When a stream ends, the bot will pause briefly to allow Twitch to process the archive, attempt to fetch the exact VOD URL, and embed it. If Twitch hasn't processed it yet, it gracefully falls back to a direct link to the streamer's recent broadcasts page.
-
-```python
 # commands/live_commands.py
 
 import discord
@@ -377,4 +369,3 @@ async def setup(bot):
     await bot.add_cog(LiveCommandsCog(bot))
     logger.info("LiveCommandsCog initialized successfully.")
 
-```
