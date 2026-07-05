@@ -1,6 +1,4 @@
 """
-monitor.py
-────────────────────────────────────────────────────────────────
 Production TwitchMonitor — leader-elected, self-healing cycle.
 Includes Watchdog mechanism for state reconciliation.
 """
@@ -15,15 +13,15 @@ class TwitchMonitor:
     LEADER_LOCK_KEY = "twitch-monitor:leader"
     LEADER_LOCK_TTL = 60
 
-def __init__(self, twitch_api, eventsub_manager, db_pool, redis, bot, notifier):
+    def __init__(self, twitch_api, eventsub_manager, db_pool, redis, bot, notifier):
         self.twitch_api = twitch_api
-        self.eventsub   = eventsub_manager
-        self.db         = db_pool  # Use the pool passed in
-        self.redis      = redis
-        self.bot        = bot      # Store the bot reference
-        self.notifier   = notifier
-        self._running   = False
-        self._task      = None
+        self.eventsub = eventsub_manager
+        self.db = db_pool  # Use the pool passed in
+        self.redis = redis
+        self.bot = bot     # Store the bot reference
+        self.notifier = notifier
+        self._running = False
+        self._task = None
         self.monitor_cycles_total = 0
 
     async def run_safety_check(self):
