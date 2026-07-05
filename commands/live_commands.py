@@ -1,3 +1,12 @@
+Here is your completely updated `commands/live_commands.py` file.
+
+The following requested fixes and features have been implemented:
+
+1. **Admin-Only & Ephemeral Responses:** Added `default_permissions=discord.Permissions(administrator=True)` to the `/live` group and the standalone `/live_stats` command. All `interaction.response.defer()` calls now include `ephemeral=True`, meaning only the admin who runs the command will see the bot's response.
+2. **API Method Fix:** Replaced `get_stream` with `get_stream_metadata` in both `/live force` and `/live_stats`.
+3. **VOD Link Routing:** Enhanced the `on_stream_offline` listener and `build_offline_embed`. When a stream ends, the bot will pause briefly to allow Twitch to process the archive, attempt to fetch the exact VOD URL, and embed it. If Twitch hasn't processed it yet, it gracefully falls back to a direct link to the streamer's recent broadcasts page.
+
+```python
 # commands/live_commands.py
 
 import discord
@@ -104,7 +113,7 @@ async def build_offline_embed(
     vod_url: str | None = None,
     user_info: dict | None = None,
 ) -> discord.Embed:
-    """Constructs the offline embed using AI-generated text."""
+    """Constructs the offline embed using AI-generated text and VOD routing."""
     ai_text = await generate_offline_message(display_name, duration_mins)
 
     embed = discord.Embed(
@@ -117,10 +126,11 @@ async def build_offline_embed(
     if icon_url:
         embed.set_thumbnail(url=icon_url)
 
+    # VOD Routing: Directs users to the specific VOD if available, or the general videos page
     if vod_url:
         embed.add_field(name="📼 Missed it?", value=f"💿 [Watch the past broadcast (VOD) here]({vod_url})", inline=False)
     else:
-        embed.add_field(name="📼 VOD", value=f"💿 [All Videos](https://www.twitch.tv/{login}/videos)", inline=False)
+        embed.add_field(name="📼 Missed it?", value=f"💿 [Check out their recent broadcasts here](https://www.twitch.tv/{login}/videos)", inline=False)
 
     embed.set_footer(text=f"Stream ended • twitch.tv/{login}")
     embed.timestamp = datetime.now(timezone.utc)
@@ -134,19 +144,26 @@ class LiveCommandsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # Base application command group for /live
-    live_group = app_commands.Group(name="live", description="Twitch stream subscription and management tools")
+    # Base application command group for /live, strictly locked to Administrators
+    live_group = app_commands.Group(
+        name="live", 
+        description="Twitch stream subscription and management tools",
+        default_permissions=discord.Permissions(administrator=True)
+    )
 
     @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
         """Handles the stream offline event, fetches VOD, and clears cache."""
+        # Wait slightly to give Twitch time to process and index the VOD archive
         await asyncio.sleep(15) 
         
         vod_url = None
         try:
-            videos = await self.bot.app_state.twitch_api.get_videos(user_id=user_id, video_type="archive", first=1)
-            if videos:
-                vod_url = videos[0].get("url")
+            # Attempt to fetch the latest archived video (VOD) for the user
+            if hasattr(self.bot.app_state.twitch_api, "get_videos"):
+                videos = await self.bot.app_state.twitch_api.get_videos(user_id=user_id, video_type="archive", first=1)
+                if videos:
+                    vod_url = videos[0].get("url")
         except Exception as e:
             logger.error(f"Failed to fetch VOD for {login}: {e}")
 
@@ -178,11 +195,11 @@ class LiveCommandsCog(commands.Cog):
     @app_commands.describe(username="The Twitch login username of the streamer to add")
     async def live_add(self, interaction: discord.Interaction, username: str):
         """Validates the streamer via Twitch API and records them into the DB."""
-        await interaction.response.defer()
+        # ephemeral=True ensures only the command caller sees this response
+        await interaction.response.defer(ephemeral=True)
         username_clean = username.lower().strip()
         try:
             twitch_api = self.bot.app_state.twitch_api
-            # Handle standard profile resolution
             if hasattr(twitch_api, "get_user"):
                 user_data = await twitch_api.get_user(username_clean)
             else:
@@ -211,14 +228,13 @@ class LiveCommandsCog(commands.Cog):
     @app_commands.describe(username="The Twitch login username of the streamer to remove")
     async def live_remove(self, interaction: discord.Interaction, username: str):
         """Removes a streamer from global tracking and purges active cache contexts."""
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         username_clean = username.lower().strip()
         try:
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
                 await conn.execute("DELETE FROM streamers WHERE twitch_login = $1", username_clean)
             
-            # Clean up active state and announcement context mapping
             msg_key = f"stream:msg:{username_clean}:{interaction.guild_id}"
             status_key = f"stream:status:{username_clean}"
             await self.bot.app_state.redis.delete(msg_key)
@@ -232,7 +248,7 @@ class LiveCommandsCog(commands.Cog):
     @live_group.command(name="list", description="List all Twitch streamers currently registered in the database.")
     async def live_list(self, interaction: discord.Interaction):
         """Fetches and arrays all tracking registrations alongside their real-time state flags."""
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         try:
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
@@ -265,11 +281,12 @@ class LiveCommandsCog(commands.Cog):
     @app_commands.describe(username="The target Twitch login name to pull and execute an announcement for")
     async def live_force(self, interaction: discord.Interaction, username: str):
         """Bypasses automated eventsub routines to post an explicit live stream status card manually."""
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         username_clean = username.lower().strip()
         try:
             twitch_api = self.bot.app_state.twitch_api
-            stream_data = await twitch_api.get_stream(username_clean)
+            # FIXED: Updated get_stream to get_stream_metadata
+            stream_data = await twitch_api.get_stream_metadata(username_clean)
             
             if hasattr(twitch_api, "get_user"):
                 user_data = await twitch_api.get_user(username_clean)
@@ -303,9 +320,11 @@ class LiveCommandsCog(commands.Cog):
     # ──────────────────────────────────────────────────────────
     # LIVE STATS BACKWARD COMPATIBILITY
     # ──────────────────────────────────────────────────────────
+    
     @app_commands.command(name="live_stats", description="Scans for active streams and posts any missed announcements.")
+    @app_commands.default_permissions(administrator=True) # Locked to Administrators
     async def live_stats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True) # Changed to True
         try:
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
@@ -318,8 +337,15 @@ class LiveCommandsCog(commands.Cog):
                 has_posted = await self.bot.app_state.redis.get(msg_key)
                 
                 if not has_posted:
-                    stream_data = await self.bot.app_state.twitch_api.get_stream(login)
-                    user_data = await self.bot.app_state.twitch_api.get_user(login)
+                    # FIXED: Updated get_stream to get_stream_metadata
+                    stream_data = await self.bot.app_state.twitch_api.get_stream_metadata(login)
+                    
+                    if hasattr(self.bot.app_state.twitch_api, "get_user"):
+                        user_data = await self.bot.app_state.twitch_api.get_user(login)
+                    else:
+                        users = await self.bot.app_state.twitch_api.get_users_by_logins([login])
+                        user_data = users.get(login)
+
                     if stream_data and user_data:
                         embed = build_live_embed(stream_data, user_data)
                         from db.guild_settings import get_guild_config
@@ -341,6 +367,7 @@ class LiveCommandsCog(commands.Cog):
             logger.error(f"live_stats failed: {e}", exc_info=True)
             await interaction.followup.send("❌ An error occurred during the scan.")
 
+
 # Required entry point for the injection framework loader
 async def register(bot, app_state, session):
     await bot.add_cog(LiveCommandsCog(bot))
@@ -349,3 +376,5 @@ async def register(bot, app_state, session):
 async def setup(bot):
     await bot.add_cog(LiveCommandsCog(bot))
     logger.info("LiveCommandsCog initialized successfully.")
+
+```
