@@ -22,18 +22,15 @@ logger = logging.getLogger("live-commands")
 # ==================================================
 
 async def generate_offline_message(streamer_name: str, duration_mins: int) -> str:
-    """Generates a short, AI-assisted offline message."""
+    """Generates a short, AI-assisted offline message using Gemini."""
     fallback_msg = f"{streamer_name} had a great stream today, thanks to everyone who tuned in! 💻"
     
     if not HAS_AI:
         return fallback_msg
-
-    # Note: Make sure to configure your API key securely (e.g., in main.py or via env vars).
-    # genai.configure(api_key="YOUR_API_KEY") 
     
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        # English prompt tailored for the desired Emoji UX and tone
+        # Prompt designed to keep the farewell message friendly and tech-themed
         prompt = (
             f"Twitch streamer {streamer_name} was live for {duration_mins} minutes and "
             f"just went offline. Write a very short (1-2 sentences) farewell message for their Discord community "
@@ -41,7 +38,7 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
             f"Provide only the text, no quotes."
         )
         
-        # Run the synchronous AI call in an executor to avoid blocking the bot's event loop
+        # Execute synchronous AI call in a thread pool to avoid blocking the bot's event loop
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, model.generate_content, prompt)
         return response.text.strip()
@@ -55,10 +52,10 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
 
 def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     """Constructs the embed sent when a streamer goes live."""
-    login      = stream.get("user_login") or user.get("login", "unknown")
-    name       = stream.get("user_name")  or user.get("display_name", login)
-    title      = stream.get("title", "") or ""
-    game       = stream.get("game_name", "") or "Just Chatting"
+    login    = stream.get("user_login") or user.get("login", "unknown")
+    name     = stream.get("user_name")  or user.get("display_name", login)
+    title    = stream.get("title", "") or ""
+    game     = stream.get("game_name", "") or "Just Chatting"
     started_at = stream.get("started_at", "")
     stream_url = f"https://www.twitch.tv/{login}"
 
@@ -68,7 +65,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     ts_str = "now"
     if started_at:
         try:
-            dt     = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            dt   = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
             ts_str = f"<t:{int(dt.timestamp())}:R>"
         except Exception:
             pass
@@ -92,7 +89,6 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     embed.add_field(name="🕹️ Game",   value=game,   inline=True)
     embed.add_field(name="☕ Started", value=ts_str, inline=True)
 
-    # Convert the dynamic thumbnail URL to a fixed resolution
     raw_thumb = stream.get("thumbnail_url", "")
     thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
     if thumbnail:
@@ -104,19 +100,15 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     return embed
 
 async def build_offline_embed(
-    login:        str,
+    login: str,
     display_name: str,
     duration_mins: int,
-    stream_info:  dict | None = None,
-    vod_url:      str  | None = None,
-    user_info:    dict | None = None,
+    vod_url: str | None = None,
+    user_info: dict | None = None,
 ) -> discord.Embed:
-    """Constructs the offline embed using AI-generated text and Emoji UX."""
-    
-    # Generate the dynamic farewell message
+    """Constructs the offline embed using AI-generated text."""
     ai_text = await generate_offline_message(display_name, duration_mins)
 
-    # Darker color palette (Navy) combined with the tech emoji UX
     embed = discord.Embed(
         title=f"🧑‍💻 {display_name} has stepped away from the keyboard!",
         description=ai_text,
@@ -127,7 +119,6 @@ async def build_offline_embed(
     if icon_url:
         embed.set_thumbnail(url=icon_url)
 
-    # Attach the VOD (Video on Demand) link if available
     if vod_url:
         embed.add_field(
             name="📼 Missed it?",
@@ -153,39 +144,25 @@ class LiveCommandsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # This is an example event listener. You may need to adjust the parameters 
-    # depending on how your main loop or EventSub triggers offline events.
     @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
         """Handles the stream offline event, fetches VOD, and clears cache."""
-        
-        # 1. Wait briefly for Twitch to process and publish the VOD to their API
-        await asyncio.sleep(15) 
+        await asyncio.sleep(15) # Wait for VOD processing
         
         vod_url = None
         try:
-            # Adjust 'get_videos' based on the actual method name in your twitch_api class
-            # We specifically request 'archive' to ensure we get the latest past broadcast
             videos = await self.bot.app_state.twitch_api.get_videos(user_id=user_id, video_type="archive", first=1)
             if videos:
                 vod_url = videos[0].get("url")
         except Exception as e:
             logger.error(f"Failed to fetch VOD for {login}: {e}")
 
-        # 2. Build the offline embed with the correctly fetched VOD URL
-        embed = await build_offline_embed(
-            login=login,
-            display_name=display_name,
-            duration_mins=duration_mins,
-            vod_url=vod_url
-        )
+        embed = await build_offline_embed(login=login, display_name=display_name, duration_mins=duration_mins, vod_url=vod_url)
 
-        # 3. Send the offline announcement (adjust channel fetching logic as needed)
         try:
             from db.guild_settings import get_guild_config
             config = await get_guild_config(guild_id)
             announce_channel_id = config.get("announce_channel_id")
-            
             if announce_channel_id:
                 channel = self.bot.get_channel(announce_channel_id)
                 if channel:
@@ -193,8 +170,6 @@ class LiveCommandsCog(commands.Cog):
         except Exception as e:
             logger.error(f"Failed to send offline message for {login}: {e}")
 
-        # 4. CRITICAL: Clear the Redis cache so the bot knows the stream has ended.
-        # This prevents the bot from skipping future live announcements for this streamer.
         msg_key = f"stream:msg:{login}:{guild_id}"
         try:
             await self.bot.app_state.redis.delete(msg_key)
@@ -204,56 +179,46 @@ class LiveCommandsCog(commands.Cog):
 
     @app_commands.command(name="live_stats", description="Scans for active streams and posts any missed announcements.")
     async def live_stats(self, interaction: discord.Interaction):
+        """Manually checks DB for active streams and syncs Discord announcements."""
         await interaction.response.defer(ephemeral=False)
-        
         try:
-            # 1. Fetch currently live streamers from the database
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
                 live_streamers = await conn.fetch("SELECT * FROM streamers WHERE is_live = TRUE")
 
             recovered_count = 0
-            
             for streamer in live_streamers:
                 login = streamer["twitch_login"]
-                
-                # 2. Check Redis to see if an announcement message ID already exists for this guild
                 msg_key = f"stream:msg:{login}:{interaction.guild_id}"
                 has_posted = await self.bot.app_state.redis.get(msg_key)
                 
-                # 3. If they are live but no announcement was posted, force it
                 if not has_posted:
-                    # Fetch fresh data from Twitch API to build the embed
                     stream_data = await self.bot.app_state.twitch_api.get_stream(login)
                     user_data = await self.bot.app_state.twitch_api.get_user(login)
-                    
                     if stream_data and user_data:
                         embed = build_live_embed(stream_data, user_data)
-                        
-                        # Find the designated announcement channel from guild configurations
                         from db.guild_settings import get_guild_config
                         config = await get_guild_config(interaction.guild_id)
                         announce_channel_id = config.get("announce_channel_id")
-                        
                         if announce_channel_id:
                             channel = self.bot.get_channel(announce_channel_id)
                             if channel:
                                 sent_msg = await channel.send(embed=embed)
-                                # Update Redis state to prevent duplicate posts
                                 await self.bot.app_state.redis.set(msg_key, str(sent_msg.id))
                                 recovered_count += 1
             
-            # Final report to the user invoking the command
             if recovered_count > 0:
                 await interaction.followup.send(f"📡 Scan complete. Sent AI-supported announcements for **{recovered_count}** missed stream(s)!")
             else:
                 await interaction.followup.send("✅ All active streams are already announced. No missed streams found.")
-
         except Exception as e:
             logger.error(f"live_stats failed: {e}", exc_info=True)
-            await interaction.followup.send("❌ An error occurred during the scan. Please check the logs.")
+            await interaction.followup.send("❌ An error occurred during the scan.")
 
+# Required entry point for the bot loader
+async def register(bot):
+    await bot.add_cog(LiveCommandsCog(bot))
+    logger.info("commands.live_commands loaded successfully.")
 
 async def setup(bot):
-    await bot.add_cog(LiveCommandsCog(bot))
-    logger.info("LiveCommandsCog loaded successfully.")
+    await register(bot)
