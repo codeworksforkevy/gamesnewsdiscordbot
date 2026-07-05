@@ -153,6 +153,55 @@ class LiveCommandsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # This is an example event listener. You may need to adjust the parameters 
+    # depending on how your main loop or EventSub triggers offline events.
+    @commands.Cog.listener()
+    async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
+        """Handles the stream offline event, fetches VOD, and clears cache."""
+        
+        # 1. Wait briefly for Twitch to process and publish the VOD to their API
+        await asyncio.sleep(15) 
+        
+        vod_url = None
+        try:
+            # Adjust 'get_videos' based on the actual method name in your twitch_api class
+            # We specifically request 'archive' to ensure we get the latest past broadcast
+            videos = await self.bot.app_state.twitch_api.get_videos(user_id=user_id, video_type="archive", first=1)
+            if videos:
+                vod_url = videos[0].get("url")
+        except Exception as e:
+            logger.error(f"Failed to fetch VOD for {login}: {e}")
+
+        # 2. Build the offline embed with the correctly fetched VOD URL
+        embed = await build_offline_embed(
+            login=login,
+            display_name=display_name,
+            duration_mins=duration_mins,
+            vod_url=vod_url
+        )
+
+        # 3. Send the offline announcement (adjust channel fetching logic as needed)
+        try:
+            from db.guild_settings import get_guild_config
+            config = await get_guild_config(guild_id)
+            announce_channel_id = config.get("announce_channel_id")
+            
+            if announce_channel_id:
+                channel = self.bot.get_channel(announce_channel_id)
+                if channel:
+                    await channel.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Failed to send offline message for {login}: {e}")
+
+        # 4. CRITICAL: Clear the Redis cache so the bot knows the stream has ended.
+        # This prevents the bot from skipping future live announcements for this streamer.
+        msg_key = f"stream:msg:{login}:{guild_id}"
+        try:
+            await self.bot.app_state.redis.delete(msg_key)
+            logger.info(f"Cleared Redis cache for {login} in guild {guild_id}.")
+        except Exception as e:
+            logger.error(f"Failed to delete Redis key {msg_key}: {e}")
+
     @app_commands.command(name="live_stats", description="Scans for active streams and posts any missed announcements.")
     async def live_stats(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=False)
