@@ -1,5 +1,3 @@
-# services/twitch_api.py
-
 import os
 import time
 import asyncio
@@ -57,11 +55,13 @@ class TwitchAPI:
         async with self.session.get(url, params=params, headers=headers) as resp:
             return await resp.json()
 
-    # --- ADDED: Batch stream fetch for watchdog mechanism ---
+    # ──────────────────────────────────────────────────────────
+    # WATCHDOG BATCH FETCHING
+    # ──────────────────────────────────────────────────────────
     async def get_streams_by_ids(self, user_ids: List[str]) -> List[Dict]:
         """
         Fetch live stream data for a list of user IDs in batches of 100.
-        This is optimized for the Watchdog loop to check multiple streamers at once.
+        Optimized for the Watchdog loop to check multiple streamers at once.
         """
         if not user_ids:
             return []
@@ -78,5 +78,34 @@ class TwitchAPI:
                 
         return all_live
 
-    # Other methods (like get_users_by_logins, get_stream_metadata, etc.) 
-    # should remain below here as per your original file.
+    # ──────────────────────────────────────────────────────────
+    # MISSING METHODS ADDED FOR LIVE COMMANDS
+    # ──────────────────────────────────────────────────────────
+    async def get_stream_metadata(self, username: str) -> Optional[Dict]:
+        """Fetches live stream metadata for a specific user login."""
+        data = await self.request("streams", params=[("user_login", username)])
+        if data and data.get("data"):
+            # Return the first stream object if they are live
+            return data["data"][0]
+        return None
+
+    async def get_user(self, username: str) -> Optional[Dict]:
+        """Fetches a single user's profile data."""
+        data = await self.request("users", params=[("login", username)])
+        if data and data.get("data"):
+            return data["data"][0]
+        return None
+
+    async def get_users_by_logins(self, logins: List[str]) -> Dict[str, Dict]:
+        """Fetches user data by logins and returns a dict mapped by login name."""
+        if not logins:
+            return {}
+        params = [("login", login) for login in logins]
+        data = await self.request("users", params=params)
+        
+        result = {}
+        if data and data.get("data"):
+            for user in data["data"]:
+                # Map the user data to their lowercase login name for easy dictionary lookups
+                result[user["login"].lower()] = user
+        return result
