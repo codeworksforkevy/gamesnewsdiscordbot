@@ -6,6 +6,7 @@ CRUD helpers for the streamers table.
 Fix vs original:
 - upsert_streamer INSERT listed twitch_login and guild_id in the VALUES
   list but the column list didn't include them — fixed.
+- Added get_all_tracked_streamers to support the background watchdog safety check.
 """
 
 import logging
@@ -134,6 +135,22 @@ async def get_all_live_streamers() -> list[Dict]:
             FROM streamers
             WHERE is_live = TRUE
             ORDER BY last_updated DESC
+            """
+        )
+
+        return [dict(r) for r in rows]
+
+
+async def get_all_tracked_streamers() -> list[Dict]:
+    """Returns all tracked streamers in the DB for watchdog safety checks."""
+    pool = state.get_db_pool()
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM streamers
+            ORDER BY twitch_login ASC
             """
         )
 
