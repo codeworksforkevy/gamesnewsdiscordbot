@@ -158,6 +158,19 @@ class LiveCommandsCog(commands.Cog):
         default_permissions=discord.Permissions(administrator=True)
     )
 
+    async def _fetch_stream_data(self, twitch_api, username: str) -> dict | None:
+        """Helper sequence to safely resolve stream data matching your internal API naming."""
+        if hasattr(twitch_api, "get_stream_metadata"):
+            return await twitch_api.get_stream_metadata(username)
+        elif hasattr(twitch_api, "get_stream"):
+            return await twitch_api.get_stream(username)
+        elif hasattr(twitch_api, "get_stream_info"):
+            return await twitch_api.get_stream_info(username)
+        elif hasattr(twitch_api, "get_streams"):
+            streams = await twitch_api.get_streams([username])
+            return streams[0] if streams else None
+        return None
+
     @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
         """Handles the stream offline event, fetches VOD, and clears cache."""
@@ -286,7 +299,7 @@ class LiveCommandsCog(commands.Cog):
         username_clean = username.lower().strip()
         try:
             twitch_api = self.bot.app_state.twitch_api
-            stream_data = await twitch_api.get_stream_metadata(username_clean)
+            stream_data = await self._fetch_stream_data(twitch_api, username_clean)
             
             if hasattr(twitch_api, "get_user"):
                 user_data = await twitch_api.get_user(username_clean)
@@ -326,18 +339,20 @@ class LiveCommandsCog(commands.Cog):
             live_streamers = await get_all_live_streamers()
 
             recovered_count = 0
+            twitch_api = self.bot.app_state.twitch_api
+            
             for streamer in live_streamers:
                 login = streamer["twitch_login"]
                 msg_key = f"stream:msg:{login}:{interaction.guild_id}"
                 has_posted = await self.bot.app_state.redis.get(msg_key)
                 
                 if not has_posted:
-                    stream_data = await self.bot.app_state.twitch_api.get_stream_metadata(login)
+                    stream_data = await self._fetch_stream_data(twitch_api, login)
                     
-                    if hasattr(self.bot.app_state.twitch_api, "get_user"):
-                        user_data = await self.bot.app_state.twitch_api.get_user(login)
+                    if hasattr(twitch_api, "get_user"):
+                        user_data = await twitch_api.get_user(login)
                     else:
-                        users = await self.bot.app_state.twitch_api.get_users_by_logins([login])
+                        users = await twitch_api.get_users_by_logins([login])
                         user_data = users.get(login)
 
                     if stream_data and user_data:
@@ -369,7 +384,7 @@ async def register(bot, app_state, session):
     else:
         logger.info("LiveCommandsCog already loaded, skipping registration.")
 
-# Fixed: Required setup function for discord.py extension loading
+# Required setup function for discord.py extension loading
 async def setup(bot):
     await bot.add_cog(LiveCommandsCog(bot))
     logger.info("commands.live_commands extension setup complete.")
