@@ -1,16 +1,3 @@
-Here is the fully corrected, end-to-end rewritten version of `commands/live_commands.py`.
-
-### Key Improvements Made:
-
-* **Database Pipeline Fixed:** Replaced the broken manual database queries with the unified query functions from `db/streamer_queries.py`.
-* **Database Schema Mismatch Solved:** `live_add` now properly retrieves the unique `twitch_user_id` from the Twitch API payload and feeds it to your `upsert_streamer` function, preventing database constraint crashes.
-* **Friendly AI Helper Calibration:** Updated the Gemini text prompt to frame your streamers as **cherished friends**, making the community farewell cards sound warmer and more personal.
-
----
-
-### Complete File: `commands/live_commands.py`
-
-```python
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -386,5 +373,3 @@ async def register(bot, app_state, session):
 async def setup(bot):
     await bot.add_cog(LiveCommandsCog(bot))
     logger.info("commands.live_commands extension setup complete.")
-
-```
