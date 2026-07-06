@@ -7,13 +7,6 @@ import time
 import os
 from datetime import datetime, timezone
 
-# Import our dedicated data mapping queries layer
-from db.streamer_queries import (
-    upsert_streamer,
-    get_all_live_streamers,
-    get_all_tracked_streamers
-)
-
 # Migration to 'google-genai'
 try:
     from google import genai
@@ -28,8 +21,8 @@ logger = logging.getLogger("live-commands")
 # ==================================================
 
 async def generate_offline_message(streamer_name: str, duration_mins: int) -> str:
-    """Generates a short, friendly, AI-assisted offline message for our streamer friends."""
-    fallback_msg = f"Our friend {streamer_name} had a fantastic stream today! Thanks to everyone who tuned in and hung out! 💻"
+    """Generates a short, AI-assisted offline message using the new Gemini client."""
+    fallback_msg = f"{streamer_name} had a great stream today, thanks to everyone who tuned in! 💻"
     
     if not HAS_AI:
         return fallback_msg
@@ -38,17 +31,17 @@ async def generate_offline_message(streamer_name: str, duration_mins: int) -> st
         # Initialize client - requires GEMINI_API_KEY env var
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         
-        # Adjusted to frame the streamer warmly as a friend of the community
         prompt = (
-            f"Our wonderful streamer friend {streamer_name} was just live for {duration_mins} minutes and "
-            f"has stepped away from the keyboard. Write a very short (1-2 sentences) farewell message for our Discord community. "
-            f"Make it sound incredibly supportive, friendly, appreciative of our friend's hard work, and include tech/computer emojis (💻, 🧑‍💻). "
-            f"Provide only the clean text message with no quotation marks."
+            f"Twitch streamer {streamer_name} was live for {duration_mins} minutes and "
+            f"just went offline. Write a very short (1-2 sentences) farewell message for their Discord community "
+            f"that is friendly, appreciative, and uses computer/tech-related emojis (💻, 🧑‍💻). "
+            f"Provide only the text, no quotes."
         )
         
         # Execute synchronous AI call in an executor thread to avoid event loop blocking
         loop = asyncio.get_running_loop()
         
+        # Wrapped in a lambda to handle the new client method signature
         response = await loop.run_in_executor(
             None, 
             lambda: client.models.generate_content(
@@ -93,7 +86,7 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     )
 
     embed.set_author(
-        name=f"🔴 Our friend {name} is live!",
+        name=f"🔴 {name} is live!",
         url=stream_url,
         icon_url=user.get("profile_image_url"),
     )
@@ -134,6 +127,7 @@ async def build_offline_embed(
     if icon_url:
         embed.set_thumbnail(url=icon_url)
 
+    # VOD Routing: Directs users to the specific VOD if available, or the general videos page
     if vod_url:
         embed.add_field(name="📼 Missed it?", value=f"💿 [Watch the past broadcast (VOD) here]({vod_url})", inline=False)
     else:
@@ -157,19 +151,6 @@ class LiveCommandsCog(commands.Cog):
         description="Twitch stream subscription and management tools",
         default_permissions=discord.Permissions(administrator=True)
     )
-
-    async def _fetch_stream_data(self, twitch_api, username: str) -> dict | None:
-        """Helper sequence to safely resolve stream data matching your internal API naming."""
-        if hasattr(twitch_api, "get_stream_metadata"):
-            return await twitch_api.get_stream_metadata(username)
-        elif hasattr(twitch_api, "get_stream"):
-            return await twitch_api.get_stream(username)
-        elif hasattr(twitch_api, "get_stream_info"):
-            return await twitch_api.get_stream_info(username)
-        elif hasattr(twitch_api, "get_streams"):
-            streams = await twitch_api.get_streams([username])
-            return streams[0] if streams else None
-        return None
 
     @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
@@ -226,18 +207,16 @@ class LiveCommandsCog(commands.Cog):
                 await interaction.followup.send(f"❌ Twitch user `{username_clean}` could not be verified or found.")
                 return
 
-            twitch_user_id = str(user_data.get("id"))
             display_name = user_data.get("display_name", username_clean)
-            guild_id = interaction.guild_id
-
-            # Clean and modern abstraction helper execution
-            await upsert_streamer(
-                twitch_user_id=twitch_user_id,
-                twitch_login=username_clean,
-                guild_id=guild_id
-            )
+            pool = self.bot.app_state.db.pool
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO streamers (twitch_login, is_live) VALUES ($1, FALSE) "
+                    "ON CONFLICT (twitch_login) DO NOTHING",
+                    username_clean
+                )
             
-            await interaction.followup.send(f"✅ Successfully added our friend **{display_name}** (`{username_clean}`) to the tracking list!")
+            await interaction.followup.send(f"✅ Successfully added **{display_name}** (`{username_clean}`) to the tracking list!")
         except Exception as e:
             logger.error(f"Failed to add streamer {username_clean}: {e}", exc_info=True)
             await interaction.followup.send("❌ An unexpected database error occurred while adding the record.")
@@ -266,8 +245,9 @@ class LiveCommandsCog(commands.Cog):
     async def live_list(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            # Replaced raw database fetch with query layer module function
-            rows = await get_all_tracked_streamers()
+            pool = self.bot.app_state.db.pool
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT twitch_login, is_live FROM streamers ORDER BY twitch_login ASC")
             
             if not rows:
                 await interaction.followup.send("💤 The subscription database is completely empty.")
@@ -286,10 +266,10 @@ class LiveCommandsCog(commands.Cog):
             ]
             
             embed.description = "\n".join(lines)
-            embed.set_footer(text=f"Total Registered Friends: {len(rows)}")
+            embed.set_footer(text=f"Total Registrations: {len(rows)}")
             await interaction.followup.send(embed=embed)
         except Exception as e:
-            logger.error(f"Failed to build tracking overview list: {e}", exc_info=True)
+            logger.error(f"Failed to build tracking overview array list: {e}", exc_info=True)
             await interaction.followup.send("❌ Internal tracking compilation query failed.")
 
     @live_group.command(name="force", description="Force an immediate live announcement card bypass for an active channel.")
@@ -299,7 +279,7 @@ class LiveCommandsCog(commands.Cog):
         username_clean = username.lower().strip()
         try:
             twitch_api = self.bot.app_state.twitch_api
-            stream_data = await self._fetch_stream_data(twitch_api, username_clean)
+            stream_data = await twitch_api.get_stream_metadata(username_clean)
             
             if hasattr(twitch_api, "get_user"):
                 user_data = await twitch_api.get_user(username_clean)
@@ -335,24 +315,23 @@ class LiveCommandsCog(commands.Cog):
     async def live_stats(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            # Replaced raw SQL execution with our verified query implementation layer
-            live_streamers = await get_all_live_streamers()
+            pool = self.bot.app_state.db.pool
+            async with pool.acquire() as conn:
+                live_streamers = await conn.fetch("SELECT * FROM streamers WHERE is_live = TRUE")
 
             recovered_count = 0
-            twitch_api = self.bot.app_state.twitch_api
-            
             for streamer in live_streamers:
                 login = streamer["twitch_login"]
                 msg_key = f"stream:msg:{login}:{interaction.guild_id}"
                 has_posted = await self.bot.app_state.redis.get(msg_key)
                 
                 if not has_posted:
-                    stream_data = await self._fetch_stream_data(twitch_api, login)
+                    stream_data = await self.bot.app_state.twitch_api.get_stream_metadata(login)
                     
-                    if hasattr(twitch_api, "get_user"):
-                        user_data = await twitch_api.get_user(login)
+                    if hasattr(self.bot.app_state.twitch_api, "get_user"):
+                        user_data = await self.bot.app_state.twitch_api.get_user(login)
                     else:
-                        users = await twitch_api.get_users_by_logins([login])
+                        users = await self.bot.app_state.twitch_api.get_users_by_logins([login])
                         user_data = users.get(login)
 
                     if stream_data and user_data:
@@ -378,13 +357,14 @@ class LiveCommandsCog(commands.Cog):
 
 # Required entry point for the injection framework loader
 async def register(bot, app_state, session):
+    # Only register if the cog isn't already loaded
     if bot.get_cog("LiveCommandsCog") is None:
         await bot.add_cog(LiveCommandsCog(bot))
         logger.info("commands.live_commands group pipeline loaded successfully.")
     else:
         logger.info("LiveCommandsCog already loaded, skipping registration.")
 
-# Required setup function for discord.py extension loading
+# Fixed: Required setup function for discord.py extension loading
 async def setup(bot):
     await bot.add_cog(LiveCommandsCog(bot))
     logger.info("commands.live_commands extension setup complete.")
