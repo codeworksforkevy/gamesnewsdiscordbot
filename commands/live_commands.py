@@ -16,6 +16,57 @@ except ImportError:
 
 logger = logging.getLogger("live-commands")
 
+# ──────────────────────────────────────────────────────────────
+# KNOWN STREAMERS — source of truth for KevKevvy's Plaza
+# Pulled from the `streamers` DB table on 2026-07-13.
+# Add new streamers here AND run /live add so EventSub subscribes.
+# ──────────────────────────────────────────────────────────────
+GUILD_ID = 1446560723122520207
+ANNOUNCE_CHANNEL_ID = 1446562626695074006
+
+KNOWN_STREAMERS: dict[str, str] = {
+    # login               twitch_user_id
+    "pancitplease":      "766528698",
+    "mkaybecca":         "233809759",
+    "frasedisplays":     "54088839",
+    "mirellemistlight":  "786543297",
+    "eziverse":          "617198890",
+    "bigbootykennyx":    "481101604",
+    "ellefyi":           "639451042",
+    "niiaaah":           "1041575461",
+    "mousey2975":        "231954099",
+    "amble_may2002":     "623178384",
+    "r1sky_90":          "84534136",
+    "cxrrinajxyne":      "535859139",
+    "realgirlsdontgame": "535406506",
+    "keats___":          "256599363",
+    "neledraaa":         "555678290",   # was missing from DB — seeded at startup
+}
+
+
+async def seed_known_streamers(db_pool) -> None:
+    """
+    Ensures every entry in KNOWN_STREAMERS exists in the DB.
+    Idempotent — safe to call on every startup.
+    """
+    inserted = 0
+    async with db_pool.acquire() as conn:
+        for login, user_id in KNOWN_STREAMERS.items():
+            result = await conn.execute(
+                """
+                INSERT INTO streamers (guild_id, twitch_user_id, twitch_login)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (guild_id, twitch_login) DO NOTHING
+                """,
+                GUILD_ID, user_id, login,
+            )
+            if result == "INSERT 0 1":
+                inserted += 1
+    if inserted:
+        logger.info(f"seed_known_streamers: inserted {inserted} missing streamer(s) into DB.")
+    else:
+        logger.info("seed_known_streamers: all known streamers already in DB.")
+
 # ==================================================
 # AI MESSAGE GENERATOR
 # ==================================================
@@ -171,20 +222,41 @@ class LiveCommandsCog(commands.Cog):
         try:
             from db.guild_settings import get_guild_config
             config = await get_guild_config(guild_id)
-            announce_channel_id = config.get("announce_channel_id")
-            if announce_channel_id:
-                channel = self.bot.get_channel(announce_channel_id)
-                if channel:
-                    await channel.send(embed=embed)
+            announce_channel_id = (
+                config.get("announce_channel_id") or ANNOUNCE_CHANNEL_ID
+            )
+            channel = self.bot.get_channel(announce_channel_id)
+            if channel:
+                await channel.send(embed=embed)
+            else:
+                logger.warning(f"Announce channel {announce_channel_id} not found for {login}")
         except Exception as e:
             logger.error(f"Failed to send offline message for {login}: {e}")
 
-        msg_key = f"stream:msg:{login}:{guild_id}"
+        # ── Update DB: mark streamer as offline ──────────────────
+        try:
+            pool = self.bot.app_state.db.pool
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE streamers
+                    SET is_live = FALSE, last_updated = NOW()
+                    WHERE twitch_login = $1 AND guild_id = $2
+                    """,
+                    login, guild_id,
+                )
+        except Exception as e:
+            logger.error(f"Failed to update is_live=FALSE for {login}: {e}")
+
+        # ── Clear Redis keys ─────────────────────────────────────
+        msg_key    = f"stream:msg:{login}:{guild_id}"
+        status_key = f"stream:status:{login}"
         try:
             await self.bot.app_state.redis.delete(msg_key)
+            await self.bot.app_state.redis.delete(status_key)
             logger.info(f"Cleared Redis cache for {login} in guild {guild_id}.")
         except Exception as e:
-            logger.error(f"Failed to delete Redis key {msg_key}: {e}")
+            logger.error(f"Failed to delete Redis keys for {login}: {e}")
 
     # ──────────────────────────────────────────────────────────
     # SUBCOMMANDS
@@ -207,15 +279,29 @@ class LiveCommandsCog(commands.Cog):
                 await interaction.followup.send(f"❌ Twitch user `{username_clean}` could not be verified or found.")
                 return
 
-            display_name = user_data.get("display_name", username_clean)
+            display_name   = user_data.get("display_name", username_clean)
+            twitch_user_id = user_data.get("id", KNOWN_STREAMERS.get(username_clean, ""))
+            guild_id       = interaction.guild_id or GUILD_ID
+
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO streamers (twitch_login, is_live) VALUES ($1, FALSE) "
-                    "ON CONFLICT (twitch_login) DO NOTHING",
-                    username_clean
+                    """
+                    INSERT INTO streamers (guild_id, twitch_user_id, twitch_login)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (guild_id, twitch_login) DO NOTHING
+                    """,
+                    guild_id, twitch_user_id, username_clean,
                 )
-            
+
+            # Trigger EventSub subscription for the new streamer
+            from core.event_bus import event_bus
+            await event_bus.publish("streamer_added", {
+                "twitch_user_id": twitch_user_id,
+                "twitch_login":   username_clean,
+                "guild_id":       guild_id,
+            })
+
             await interaction.followup.send(f"✅ Successfully added **{display_name}** (`{username_clean}`) to the tracking list!")
         except Exception as e:
             logger.error(f"Failed to add streamer {username_clean}: {e}", exc_info=True)
@@ -292,68 +378,144 @@ class LiveCommandsCog(commands.Cog):
                 return
 
             embed = build_live_embed(stream_data, user_data)
+
+            # Channel lookup with hardcoded fallback
             from db.guild_settings import get_guild_config
-            config = await get_guild_config(interaction.guild_id)
-            announce_channel_id = config.get("announce_channel_id")
-            
-            if announce_channel_id:
-                channel = self.bot.get_channel(announce_channel_id)
-                if channel:
-                    sent_msg = await channel.send(embed=embed)
-                    msg_key = f"stream:msg:{username_clean}:{interaction.guild_id}"
-                    await self.bot.app_state.redis.set(msg_key, str(sent_msg.id))
-                    await interaction.followup.send(f"🚀 Live feed bypass executed for **{username_clean}** in <#{announce_channel_id}>.")
-                    return
-            
-            await interaction.followup.send("❌ Target destination communication pipeline channel context missing for this server.")
+            try:
+                cfg = await get_guild_config(interaction.guild_id)
+                announce_channel_id = cfg.get("announce_channel_id") or ANNOUNCE_CHANNEL_ID
+            except Exception:
+                announce_channel_id = ANNOUNCE_CHANNEL_ID
+
+            channel = self.bot.get_channel(announce_channel_id)
+            if not channel:
+                await interaction.followup.send(f"❌ Could not find announce channel ({announce_channel_id}).")
+                return
+
+            sent_msg = await channel.send(embed=embed)
+
+            # Update Redis: message id + live status
+            guild_id   = interaction.guild_id or GUILD_ID
+            msg_key    = f"stream:msg:{username_clean}:{guild_id}"
+            status_key = f"stream:status:{username_clean}"
+            stream_id  = stream_data.get("id", "live")
+            await self.bot.app_state.redis.set(msg_key, str(sent_msg.id))
+            await self.bot.app_state.redis.set(status_key, stream_id, ttl=21600)
+
+            # Update DB: mark streamer as live
+            try:
+                pool = self.bot.app_state.db.pool
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE streamers
+                        SET is_live = TRUE,
+                            title        = $2,
+                            game_name    = $3,
+                            viewer_count = $4,
+                            last_updated = NOW()
+                        WHERE twitch_login = $1 AND guild_id = $5
+                        """,
+                        username_clean,
+                        stream_data.get("title", ""),
+                        stream_data.get("game_name", ""),
+                        stream_data.get("viewer_count", 0),
+                        guild_id,
+                    )
+            except Exception as e:
+                logger.error(f"live_force: DB update failed for {username_clean}: {e}")
+
+            await interaction.followup.send(
+                f"🚀 Live notification sent for **{username_clean}** in <#{announce_channel_id}>."
+            )
         except Exception as e:
             logger.error(f"Bypass injection sequence failed for {username_clean}: {e}", exc_info=True)
             await interaction.followup.send("❌ Error forcing stream validation context processing.")
 
-    @app_commands.command(name="live_stats", description="Scans for active streams and posts any missed announcements.")
-    @app_commands.default_permissions(administrator=True)
+    @live_group.command(name="stats", description="Scans Twitch right now and posts any missed live announcements.")
     async def live_stats(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
+            guild_id = interaction.guild_id or GUILD_ID
+
+            # Pull all tracked logins from DB (fallback: KNOWN_STREAMERS)
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
-                live_streamers = await conn.fetch("SELECT * FROM streamers WHERE is_live = TRUE")
+                rows = await conn.fetch(
+                    "SELECT twitch_login FROM streamers WHERE guild_id = $1", guild_id
+                )
+            db_logins = {r["twitch_login"] for r in rows}
+            all_logins = list(db_logins | set(KNOWN_STREAMERS.keys()))
 
-            recovered_count = 0
-            for streamer in live_streamers:
-                login = streamer["twitch_login"]
-                msg_key = f"stream:msg:{login}:{interaction.guild_id}"
-                has_posted = await self.bot.app_state.redis.get(msg_key)
-                
-                if not has_posted:
-                    stream_data = await self.bot.app_state.twitch_api.get_stream_metadata(login)
-                    
-                    if hasattr(self.bot.app_state.twitch_api, "get_user"):
-                        user_data = await self.bot.app_state.twitch_api.get_user(login)
-                    else:
-                        users = await self.bot.app_state.twitch_api.get_users_by_logins([login])
-                        user_data = users.get(login)
+            if not all_logins:
+                await interaction.followup.send("📭 No streamers tracked yet.")
+                return
 
-                    if stream_data and user_data:
-                        embed = build_live_embed(stream_data, user_data)
-                        from db.guild_settings import get_guild_config
-                        config = await get_guild_config(interaction.guild_id)
-                        announce_channel_id = config.get("announce_channel_id")
-                        if announce_channel_id:
-                            channel = self.bot.get_channel(announce_channel_id)
-                            if channel:
-                                sent_msg = await channel.send(embed=embed)
-                                await self.bot.app_state.redis.set(msg_key, str(sent_msg.id))
-                                recovered_count += 1
-            
-            if recovered_count > 0:
-                await interaction.followup.send(f"📡 Scan complete. Sent AI-supported announcements for **{recovered_count}** missed stream(s)!")
+            # Ask Twitch who is actually live right now
+            twitch_api   = self.bot.app_state.twitch_api
+            live_streams = await twitch_api.get_streams_by_logins(all_logins)
+            live_map     = {s["user_login"].lower(): s for s in live_streams}
+
+            # Channel lookup with fallback
+            from db.guild_settings import get_guild_config
+            try:
+                cfg = await get_guild_config(guild_id)
+                announce_channel_id = cfg.get("announce_channel_id") or ANNOUNCE_CHANNEL_ID
+            except Exception:
+                announce_channel_id = ANNOUNCE_CHANNEL_ID
+
+            channel = self.bot.get_channel(announce_channel_id)
+
+            recovered = 0
+            for login, stream in live_map.items():
+                msg_key    = f"stream:msg:{login}:{guild_id}"
+                status_key = f"stream:status:{login}"
+
+                already_posted = await self.bot.app_state.redis.get(msg_key)
+                if already_posted:
+                    continue  # notification already sent this session
+
+                # Missed EventSub — recover
+                if hasattr(twitch_api, "get_user_by_login"):
+                    user_data = await twitch_api.get_user_by_login(login) or {}
+                elif hasattr(twitch_api, "get_user"):
+                    user_data = await twitch_api.get_user(login) or {}
+                else:
+                    users     = await twitch_api.get_users_by_logins([login])
+                    user_data = users.get(login, {})
+
+                embed = build_live_embed(stream, user_data)
+                if channel:
+                    sent_msg = await channel.send(embed=embed)
+                    await self.bot.app_state.redis.set(msg_key, str(sent_msg.id))
+                    await self.bot.app_state.redis.set(status_key, stream.get("id", "live"), ttl=21600)
+
+                # Persist live state to DB
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE streamers
+                        SET is_live = TRUE, title = $2, game_name = $3,
+                            viewer_count = $4, last_updated = NOW()
+                        WHERE twitch_login = $1 AND guild_id = $5
+                        """,
+                        login,
+                        stream.get("title", ""),
+                        stream.get("game_name", ""),
+                        stream.get("viewer_count", 0),
+                        guild_id,
+                    )
+                recovered += 1
+
+            if recovered:
+                await interaction.followup.send(
+                    f"📡 Scan complete — recovered **{recovered}** missed stream notification(s)!"
+                )
             else:
-                await interaction.followup.send("✅ All active streams are already announced. No missed streams found.")
-
-        except Exception as e:
-            logger.error(f"live_stats failed: {e}", exc_info=True)
-            await interaction.followup.send("❌ An error occurred during the scan.")
+                await interaction.followup.send(
+                    f"✅ All {len(live_map)} live stream(s) are already announced. "
+                    f"({len(all_logins) - len(live_map)} streamer(s) offline.)"
+                )
 
 # Required entry point for the injection framework loader
 async def register(bot, app_state, session):
