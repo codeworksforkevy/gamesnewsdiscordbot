@@ -196,6 +196,14 @@ class LiveCommandsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    async def cog_load(self) -> None:
+        """Runs once when the cog is loaded — seeds any missing KNOWN_STREAMERS into the DB."""
+        try:
+            pool = self.bot.app_state.db.pool
+            await seed_known_streamers(pool)
+        except Exception as e:
+            logger.error(f"cog_load: seed_known_streamers failed: {e}", exc_info=True)
+
     # Base application command group for /live, strictly locked to Administrators
     live_group = app_commands.Group(
         name="live", 
@@ -516,6 +524,10 @@ class LiveCommandsCog(commands.Cog):
                     f"✅ All {len(live_map)} live stream(s) are already announced. "
                     f"({len(all_logins) - len(live_map)} streamer(s) offline.)"
                 )
+
+        except Exception as e:
+            logger.error(f"live_stats failed: {e}", exc_info=True)
+            await interaction.followup.send("❌ An error occurred during the scan.")
 
 # Required entry point for the injection framework loader
 async def register(bot, app_state, session):
