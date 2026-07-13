@@ -48,20 +48,28 @@ async def seed_known_streamers(db_pool) -> None:
     """
     Ensures every entry in KNOWN_STREAMERS exists in the DB.
     Idempotent — safe to call on every startup.
+
+    NOTE: the `streamers` table has no unique constraint on
+    (guild_id, twitch_login), so ON CONFLICT can't be used here.
+    We check-then-insert manually instead.
     """
     inserted = 0
     async with db_pool.acquire() as conn:
         for login, user_id in KNOWN_STREAMERS.items():
-            result = await conn.execute(
+            exists = await conn.fetchval(
+                "SELECT 1 FROM streamers WHERE guild_id = $1 AND twitch_login = $2",
+                GUILD_ID, login,
+            )
+            if exists:
+                continue
+            await conn.execute(
                 """
                 INSERT INTO streamers (guild_id, twitch_user_id, twitch_login)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (guild_id, twitch_login) DO NOTHING
                 """,
                 GUILD_ID, user_id, login,
             )
-            if result == "INSERT 0 1":
-                inserted += 1
+            inserted += 1
     if inserted:
         logger.info(f"seed_known_streamers: inserted {inserted} missing streamer(s) into DB.")
     else:
@@ -293,14 +301,18 @@ class LiveCommandsCog(commands.Cog):
 
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO streamers (guild_id, twitch_user_id, twitch_login)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (guild_id, twitch_login) DO NOTHING
-                    """,
-                    guild_id, twitch_user_id, username_clean,
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM streamers WHERE guild_id = $1 AND twitch_login = $2",
+                    guild_id, username_clean,
                 )
+                if not exists:
+                    await conn.execute(
+                        """
+                        INSERT INTO streamers (guild_id, twitch_user_id, twitch_login)
+                        VALUES ($1, $2, $3)
+                        """,
+                        guild_id, twitch_user_id, username_clean,
+                    )
 
             # Trigger EventSub subscription for the new streamer
             from core.event_bus import event_bus
