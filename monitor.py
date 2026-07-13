@@ -2,12 +2,14 @@
 Production TwitchMonitor — leader-elected, self-healing cycle.
 Includes Watchdog mechanism for state reconciliation.
 """
-
 import asyncio
 import logging
 from typing import Optional
 
+from events.stream_events import KNOWN_STREAMERS
+
 logger = logging.getLogger("twitch-monitor")
+
 
 class TwitchMonitor:
     LEADER_LOCK_KEY = "twitch-monitor:leader"
@@ -16,9 +18,9 @@ class TwitchMonitor:
     def __init__(self, twitch_api, eventsub_manager, db_pool, redis, bot, notifier):
         self.twitch_api = twitch_api
         self.eventsub = eventsub_manager
-        self.db = db_pool  # Use the pool passed in
+        self.db = db_pool
         self.redis = redis
-        self.bot = bot     # Store the bot reference
+        self.bot = bot
         self.notifier = notifier
         self._running = False
         self._task = None
@@ -27,25 +29,42 @@ class TwitchMonitor:
     async def run_safety_check(self):
         """
         [Watchdog] Periodically verifies live status against Twitch API.
-        If an event was missed, it triggers the notification pipeline.
+        If an EventSub notification was missed, triggers the notification pipeline.
         """
         try:
-            tracked = await self.db.get_all_tracked_streamers()
-            user_ids = [s.id for s in tracked]
-            
-            if not user_ids:
+            # ── 1. Fetch tracked streamers from DB ───────────────────────────
+            rows = await self.db.fetch(
+                "SELECT DISTINCT twitch_login, twitch_user_id FROM streamers"
+            )
+
+            # ── 2. Merge with KNOWN_STREAMERS (same pattern as StreamMonitor) ─
+            # Streamers not yet added via /live add are still monitored.
+            db_logins = {r["twitch_login"] for r in rows}
+            all_logins = list(db_logins)
+            for login in KNOWN_STREAMERS:
+                if login not in db_logins:
+                    all_logins.append(login)
+
+            if not all_logins:
                 return
 
-            # Batch fetch live streams (up to 100 per request)
-            live_streams = await self.twitch_api.get_streams_by_ids(user_ids)
+            # ── 3. Batch-fetch live status from Twitch API ───────────────────
+            live_streams = await self.twitch_api.get_streams_by_logins(all_logins)
 
+            # ── 4. Recovery: post notifications for any missed EventSub events ─
             for stream in live_streams:
-                status_key = f"stream:status:{stream['user_login'].lower()}"
-                
-                # If live on Twitch but not in Redis, we missed the EventSub
-                if not await self.redis.exists(status_key):
-                    logger.warning(f"[Watchdog] {stream['user_login']} is live but missing in Redis! Recovery triggered.")
-                    await self.redis.set(status_key, "true", ttl=3600)
+                login      = stream["user_login"].lower()
+                stream_id  = stream.get("id", "live")
+                status_key = f"stream:status:{login}"
+
+                already_tracked = await self.redis.get(status_key)
+                if not already_tracked:
+                    logger.warning(
+                        f"[Watchdog] {login} is live but not in Redis — "
+                        f"EventSub may have been missed. Triggering recovery."
+                    )
+                    # Store stream_id to match the pattern used by handle_stream_online
+                    await self.redis.set(status_key, stream_id, ttl=3600)
                     await self.notifier.stream_online(stream)
 
         except Exception as e:
@@ -55,8 +74,8 @@ class TwitchMonitor:
         """Main monitoring loop."""
         while self._running:
             self.monitor_cycles_total += 1
-            
-            # Run safety check every 5 cycles (~5 mins)
+
+            # Run safety check every 5 cycles (~5 minutes)
             if self.monitor_cycles_total % 5 == 0:
                 await self.run_safety_check()
 
