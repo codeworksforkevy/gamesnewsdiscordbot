@@ -81,11 +81,11 @@ class TwitchMonitor:
 
             await asyncio.sleep(60)
 
-    def start(self):
+    async def start(self):
         self._running = True
         self._task = asyncio.create_task(self._cycle())
 
-    def stop(self):
+    async def stop(self):
         self._running = False
         if self._task:
             self._task.cancel()
