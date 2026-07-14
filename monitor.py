@@ -40,16 +40,19 @@ class TwitchMonitor:
             # ── 2. Merge with KNOWN_STREAMERS (same pattern as StreamMonitor) ─
             # Streamers not yet added via /live add are still monitored.
             db_logins = {r["twitch_login"] for r in rows}
-            all_logins = list(db_logins)
-            for login in KNOWN_STREAMERS:
-                if login not in db_logins:
-                    all_logins.append(login)
+            user_ids: list[str] = [
+                str(r["twitch_user_id"]) for r in rows if r["twitch_user_id"]
+            ]
+            for login, uid in KNOWN_STREAMERS.items():
+                if login not in db_logins and uid:
+                    user_ids.append(str(uid))
 
-            if not all_logins:
+            if not user_ids:
                 return
 
             # ── 3. Batch-fetch live status from Twitch API ───────────────────
-            live_streams = await self.twitch_api.get_streams_by_logins(all_logins)
+            # TwitchAPI only exposes get_streams_by_ids — no logins-based method.
+            live_streams = await self.twitch_api.get_streams_by_ids(user_ids)
 
             # ── 4. Recovery: post notifications for any missed EventSub events ─
             for stream in live_streams:
