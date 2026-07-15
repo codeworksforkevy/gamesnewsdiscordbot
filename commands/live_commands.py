@@ -458,22 +458,34 @@ class LiveCommandsCog(commands.Cog):
         try:
             guild_id = interaction.guild_id or GUILD_ID
 
-            # Pull all tracked logins from DB (fallback: KNOWN_STREAMERS)
+            # Pull all tracked logins and user IDs from DB
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT twitch_login FROM streamers WHERE guild_id = $1", guild_id
+                    "SELECT twitch_login, twitch_user_id FROM streamers WHERE guild_id = $1", guild_id
                 )
-            db_logins = {r["twitch_login"] for r in rows}
-            all_logins = list(db_logins | set(KNOWN_STREAMERS.keys()))
+            
+            # Map logins to user IDs
+            user_id_map = {}
+            for r in rows:
+                if r["twitch_user_id"]:
+                    user_id_map[r["twitch_login"]] = str(r["twitch_user_id"])
+                    
+            # Fallback mapping from KNOWN_STREAMERS
+            for login, uid in KNOWN_STREAMERS.items():
+                if uid:
+                    user_id_map[login] = str(uid)
 
-            if not all_logins:
+            all_user_ids = list(set(user_id_map.values()))
+            all_logins = list(set(user_id_map.keys()))
+
+            if not all_user_ids:
                 await interaction.followup.send("📭 No streamers tracked yet.")
                 return
 
-            # Ask Twitch who is actually live right now
+            # Ask Twitch who is actually live right now using the IDs mapping
             twitch_api   = self.bot.app_state.twitch_api
-            live_streams = await twitch_api.get_streams_by_logins(all_logins)
+            live_streams = await twitch_api.get_streams_by_ids(all_user_ids)
             live_map     = {s["user_login"].lower(): s for s in live_streams}
 
             # Channel lookup with fallback
