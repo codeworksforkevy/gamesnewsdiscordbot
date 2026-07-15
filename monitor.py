@@ -7,6 +7,7 @@ import logging
 from typing import Optional
 
 from events.stream_events import KNOWN_STREAMERS
+from core.event_bus import event_bus
 
 logger = logging.getLogger("twitch-monitor")
 
@@ -15,13 +16,12 @@ class TwitchMonitor:
     LEADER_LOCK_KEY = "twitch-monitor:leader"
     LEADER_LOCK_TTL = 60
 
-    def __init__(self, twitch_api, eventsub_manager, db_pool, redis, bot, notifier):
+    def __init__(self, twitch_api, eventsub_manager, db_pool, redis, bot):
         self.twitch_api = twitch_api
         self.eventsub = eventsub_manager
         self.db = db_pool
         self.redis = redis
         self.bot = bot
-        self.notifier = notifier
         self._running = False
         self._task = None
         self.monitor_cycles_total = 0
@@ -68,7 +68,14 @@ class TwitchMonitor:
                     )
                     # Store stream_id to match the pattern used by handle_stream_online
                     await self.redis.set(status_key, stream_id, ttl=3600)
-                    await self.notifier.stream_online(stream)
+                    
+                    await event_bus.publish("stream_online", {
+                        "twitch_user_id":         stream.get("user_id"),
+                        "twitch_login":           login,
+                        "broadcaster_user_login": login,
+                        "broadcaster_user_name":  stream.get("user_name", login),
+                        "stream":                 stream,
+                    })
 
         except Exception as e:
             logger.error(f"[Watchdog] Failed to run safety check: {e}", exc_info=True)
