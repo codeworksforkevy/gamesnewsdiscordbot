@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from events.stream_events import KNOWN_STREAMERS
+from commands.live_commands import KNOWN_STREAMERS
 
 logger = logging.getLogger("twitch-monitor")
 
