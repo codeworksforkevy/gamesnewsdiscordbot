@@ -7,7 +7,6 @@ import logging
 from typing import Optional
 
 from events.stream_events import KNOWN_STREAMERS
-from core.event_bus import event_bus
 
 logger = logging.getLogger("twitch-monitor")
 
@@ -16,12 +15,13 @@ class TwitchMonitor:
     LEADER_LOCK_KEY = "twitch-monitor:leader"
     LEADER_LOCK_TTL = 60
 
-    def __init__(self, twitch_api, eventsub_manager, db_pool, redis, bot):
+    def __init__(self, twitch_api, eventsub_manager, db_pool, redis, bot, notifier):
         self.twitch_api = twitch_api
         self.eventsub = eventsub_manager
         self.db = db_pool
         self.redis = redis
         self.bot = bot
+        self.notifier = notifier
         self._running = False
         self._task = None
         self.monitor_cycles_total = 0
@@ -40,19 +40,16 @@ class TwitchMonitor:
             # ── 2. Merge with KNOWN_STREAMERS (same pattern as StreamMonitor) ─
             # Streamers not yet added via /live add are still monitored.
             db_logins = {r["twitch_login"] for r in rows}
-            user_ids: list[str] = [
-                str(r["twitch_user_id"]) for r in rows if r["twitch_user_id"]
-            ]
-            for login, uid in KNOWN_STREAMERS.items():
-                if login not in db_logins and uid:
-                    user_ids.append(str(uid))
+            all_logins = list(db_logins)
+            for login in KNOWN_STREAMERS:
+                if login not in db_logins:
+                    all_logins.append(login)
 
-            if not user_ids:
+            if not all_logins:
                 return
 
             # ── 3. Batch-fetch live status from Twitch API ───────────────────
-            # TwitchAPI only exposes get_streams_by_ids — no logins-based method.
-            live_streams = await self.twitch_api.get_streams_by_ids(user_ids)
+            live_streams = await self.twitch_api.get_streams_by_logins(all_logins)
 
             # ── 4. Recovery: post notifications for any missed EventSub events ─
             for stream in live_streams:
@@ -68,14 +65,7 @@ class TwitchMonitor:
                     )
                     # Store stream_id to match the pattern used by handle_stream_online
                     await self.redis.set(status_key, stream_id, ttl=3600)
-                    
-                    await event_bus.publish("stream_online", {
-                        "twitch_user_id":         stream.get("user_id"),
-                        "twitch_login":           login,
-                        "broadcaster_user_login": login,
-                        "broadcaster_user_name":  stream.get("user_name", login),
-                        "stream":                 stream,
-                    })
+                    await self.notifier.stream_online(stream)
 
         except Exception as e:
             logger.error(f"[Watchdog] Failed to run safety check: {e}", exc_info=True)
@@ -85,17 +75,19 @@ class TwitchMonitor:
         while self._running:
             self.monitor_cycles_total += 1
 
-            # Run safety check every 5 cycles (~5 minutes)
-            if self.monitor_cycles_total % 5 == 0:
+            # Run safety check every 2 cycles (~2 minutes) — catches missed
+            # EventSub deliveries quickly instead of leaving streams unposted
+            # for up to 5 minutes.
+            if self.monitor_cycles_total % 2 == 0:
                 await self.run_safety_check()
 
             await asyncio.sleep(60)
 
-    async def start(self):
+    def start(self):
         self._running = True
         self._task = asyncio.create_task(self._cycle())
 
-    async def stop(self):
+    def stop(self):
         self._running = False
         if self._task:
             self._task.cancel()
