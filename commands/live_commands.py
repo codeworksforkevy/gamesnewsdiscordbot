@@ -220,6 +220,82 @@ class LiveCommandsCog(commands.Cog):
     )
 
     @commands.Cog.listener()
+    async def on_stream_online(self, user_id: str, login: str, display_name: str, guild_id: int):
+        """
+        Handles the stream online event and posts the live announcement.
+        This is the missing counterpart to on_stream_offline — without it,
+        real-time 'went live' events had nowhere to be caught and posted.
+        """
+        try:
+            twitch_api = self.bot.app_state.twitch_api
+
+            # Fetch current stream data
+            stream_data = None
+            if hasattr(twitch_api, "get_stream_metadata"):
+                stream_data = await twitch_api.get_stream_metadata(login)
+            elif hasattr(twitch_api, "get_streams_by_ids"):
+                streams = await twitch_api.get_streams_by_ids([str(user_id)])
+                stream_data = streams[0] if streams else None
+
+            if not stream_data:
+                logger.warning(f"on_stream_online: no live stream data found for {login}, skipping.")
+                return
+
+            if hasattr(twitch_api, "get_user"):
+                user_data = await twitch_api.get_user(login)
+            else:
+                users = await twitch_api.get_users_by_logins([login])
+                user_data = users.get(login)
+
+            embed = build_live_embed(stream_data, user_data or {})
+
+            from db.guild_settings import get_guild_config
+            try:
+                cfg = await get_guild_config(guild_id)
+                announce_channel_id = (cfg or {}).get("announce_channel_id") or ANNOUNCE_CHANNEL_ID
+            except Exception:
+                announce_channel_id = ANNOUNCE_CHANNEL_ID
+
+            channel = self.bot.get_channel(announce_channel_id)
+            if not channel:
+                logger.warning(f"on_stream_online: announce channel {announce_channel_id} not found for {login}")
+                return
+
+            sent_msg = await channel.send(embed=embed)
+
+            # ── Update Redis: message id + live status ───────────────
+            msg_key    = f"stream:msg:{login}:{guild_id}"
+            status_key = f"stream:status:{login}"
+            stream_id  = stream_data.get("id", "live")
+            await self.bot.app_state.redis.set(msg_key, str(sent_msg.id))
+            await self.bot.app_state.redis.set(status_key, stream_id, ttl=21600)
+
+            # ── Update DB: mark streamer as live ──────────────────────
+            try:
+                pool = self.bot.app_state.db.pool
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE streamers
+                        SET is_live = TRUE, title = $2, game_name = $3,
+                            viewer_count = $4, last_updated = NOW()
+                        WHERE twitch_login = $1 AND guild_id = $5
+                        """,
+                        login,
+                        stream_data.get("title", ""),
+                        stream_data.get("game_name", ""),
+                        stream_data.get("viewer_count", 0),
+                        guild_id,
+                    )
+            except Exception as e:
+                logger.error(f"Failed to update is_live=TRUE for {login}: {e}")
+
+            logger.info(f"on_stream_online: posted live announcement for {login} in guild {guild_id}")
+
+        except Exception as e:
+            logger.error(f"on_stream_online failed for {login}: {e}", exc_info=True)
+
+    @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
         """Handles the stream offline event, fetches VOD, and clears cache."""
         await asyncio.sleep(15) 
@@ -335,7 +411,10 @@ class LiveCommandsCog(commands.Cog):
         try:
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
-                await conn.execute("DELETE FROM streamers WHERE twitch_login = $1", username_clean)
+                await conn.execute(
+                    "DELETE FROM streamers WHERE twitch_login = $1 AND guild_id = $2",
+                    username_clean, interaction.guild_id,
+                )
             
             msg_key = f"stream:msg:{username_clean}:{interaction.guild_id}"
             status_key = f"stream:status:{username_clean}"
@@ -353,7 +432,10 @@ class LiveCommandsCog(commands.Cog):
         try:
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
-                rows = await conn.fetch("SELECT twitch_login, is_live FROM streamers ORDER BY twitch_login ASC")
+                rows = await conn.fetch(
+                    "SELECT twitch_login, is_live FROM streamers WHERE guild_id = $1 ORDER BY twitch_login ASC",
+                    interaction.guild_id,
+                )
             
             if not rows:
                 await interaction.followup.send("💤 The subscription database is completely empty.")
