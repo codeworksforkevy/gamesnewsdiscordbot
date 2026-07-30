@@ -229,13 +229,27 @@ class LiveCommandsCog(commands.Cog):
         try:
             twitch_api = self.bot.app_state.twitch_api
 
-            # Fetch current stream data
+            # ── Fetch current stream data, with a retry if Twitch hasn't
+            # ── fully populated title/thumbnail yet (common right when a
+            # ── stream just started — the go-live webhook can arrive
+            # ── before Twitch's own API reflects the full stream object).
             stream_data = None
-            if hasattr(twitch_api, "get_stream_metadata"):
-                stream_data = await twitch_api.get_stream_metadata(login)
-            elif hasattr(twitch_api, "get_streams_by_ids"):
-                streams = await twitch_api.get_streams_by_ids([str(user_id)])
-                stream_data = streams[0] if streams else None
+            for attempt in range(2):
+                if hasattr(twitch_api, "get_stream_metadata"):
+                    stream_data = await twitch_api.get_stream_metadata(login)
+                elif hasattr(twitch_api, "get_streams_by_ids"):
+                    streams = await twitch_api.get_streams_by_ids([str(user_id)])
+                    stream_data = streams[0] if streams else None
+
+                if stream_data and stream_data.get("title") and stream_data.get("thumbnail_url"):
+                    break  # got complete data
+
+                if attempt == 0:
+                    logger.info(
+                        f"on_stream_online: incomplete stream data for {login} "
+                        f"(missing title/thumbnail) — retrying in 8s"
+                    )
+                    await asyncio.sleep(8)
 
             if not stream_data:
                 logger.warning(f"on_stream_online: no live stream data found for {login}, skipping.")
