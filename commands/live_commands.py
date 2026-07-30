@@ -154,8 +154,8 @@ def build_live_embed(stream: dict, user: dict) -> discord.Embed:
     if profile_url:
         embed.set_thumbnail(url=profile_url)
 
-    embed.add_field(name="🕹️ Game",   value=game,   inline=True)
-    embed.add_field(name="☕ Started", value=ts_str, inline=True)
+    embed.add_field(name="👩‍💻 Game",   value=game,   inline=True)
+    embed.add_field(name="「」Started", value=ts_str, inline=True)
 
     raw_thumb = stream.get("thumbnail_url", "")
     thumbnail = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
