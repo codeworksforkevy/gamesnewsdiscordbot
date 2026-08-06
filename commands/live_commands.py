@@ -624,47 +624,57 @@ class LiveCommandsCog(commands.Cog):
 
             await self._update_dashboard(guild_id)
 
-            # ── Refresh the thumbnail shortly after ────────────────────
-            # Twitch's live preview image (thumbnail_url) often doesn't
-            # actually exist on their CDN until ~1-2 minutes into a stream,
-            # even though the API returns a URL for it immediately. Rather
-            # than delay the announcement itself, post now and edit the
-            # embed once the real preview is likely to have rendered.
+            # ── Refresh the thumbnail over the next several minutes ────
+            # A single retry isn't reliable enough: Twitch's live preview
+            # snapshot can take several minutes (not seconds) to actually
+            # render on their CDN, and Discord only re-fetches an embed's
+            # image when the message is edited — it won't notice on its
+            # own that a URL now points to something different. So this
+            # re-edits the message a handful of times over ~6 minutes to
+            # give it several chances to catch a properly-rendered image.
             asyncio.create_task(
-                self._refresh_live_embed_later(sent_msg, user_id, login)
+                self._refresh_live_embed_loop(sent_msg, user_id, login)
             )
 
         except Exception as e:
             logger.error(f"on_stream_online failed for {login}: {e}", exc_info=True)
 
-    async def _refresh_live_embed_later(self, message: discord.Message, user_id: str, login: str, delay: int = 90):
-        """Waits for Twitch's preview image to render, then edits the embed with the fresh thumbnail."""
-        await asyncio.sleep(delay)
-        try:
-            twitch_api = self.bot.app_state.twitch_api
-            stream_data = None
-            if hasattr(twitch_api, "get_stream_metadata"):
-                stream_data = await twitch_api.get_stream_metadata(login)
-            elif hasattr(twitch_api, "get_streams_by_ids"):
-                streams = await twitch_api.get_streams_by_ids([str(user_id)])
-                stream_data = streams[0] if streams else None
+    async def _refresh_live_embed_loop(
+        self, message: discord.Message, user_id: str, login: str,
+        attempts: int = 4, interval: int = 90,
+    ):
+        """Re-edits the live embed a few times over several minutes to catch the real thumbnail once it renders."""
+        twitch_api = self.bot.app_state.twitch_api
+        for attempt in range(attempts):
+            await asyncio.sleep(interval)
+            try:
+                stream_data = None
+                if hasattr(twitch_api, "get_stream_metadata"):
+                    stream_data = await twitch_api.get_stream_metadata(login)
+                elif hasattr(twitch_api, "get_streams_by_ids"):
+                    streams = await twitch_api.get_streams_by_ids([str(user_id)])
+                    stream_data = streams[0] if streams else None
 
-            if not stream_data:
-                return  # stream already ended — nothing to refresh
+                if not stream_data:
+                    return  # stream already ended — nothing left to refresh
 
-            if hasattr(twitch_api, "get_user"):
-                user_data = await twitch_api.get_user(login)
-            else:
-                users = await twitch_api.get_users_by_logins([login])
-                user_data = users.get(login)
+                if hasattr(twitch_api, "get_user"):
+                    user_data = await twitch_api.get_user(login)
+                else:
+                    users = await twitch_api.get_users_by_logins([login])
+                    user_data = users.get(login)
 
-            refreshed_embed = build_live_embed(stream_data, user_data or {})
-            await message.edit(embed=refreshed_embed)
-            logger.info(f"on_stream_online: refreshed thumbnail for {login}")
-        except discord.NotFound:
-            pass  # message was deleted in the meantime
-        except Exception as e:
-            logger.warning(f"on_stream_online: thumbnail refresh failed for {login}: {e}")
+                refreshed_embed = build_live_embed(stream_data, user_data or {})
+                await message.edit(embed=refreshed_embed)
+                logger.info(
+                    f"on_stream_online: thumbnail refresh attempt {attempt + 1}/{attempts} for {login}"
+                )
+            except discord.NotFound:
+                return  # message was deleted — stop retrying
+            except Exception as e:
+                logger.warning(
+                    f"on_stream_online: thumbnail refresh attempt {attempt + 1} failed for {login}: {e}"
+                )
 
     @commands.Cog.listener()
     async def on_stream_offline(self, user_id: str, login: str, display_name: str, duration_mins: int, guild_id: int):
