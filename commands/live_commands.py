@@ -5,6 +5,7 @@ import logging
 import asyncio
 import time
 import os
+import aiohttp
 from datetime import datetime, timezone
 
 # Migration to 'google-genai'
@@ -258,6 +259,23 @@ class LiveCommandsCog(commands.Cog):
     async def cog_unload(self) -> None:
         if hasattr(self, "_title_watch_task"):
             self._title_watch_task.cancel()
+
+    async def _thumbnail_is_ready(self, url: str) -> bool:
+        """
+        Checks whether Twitch's live preview image actually exists yet,
+        rather than trusting that a non-empty thumbnail_url means the image
+        is real — Twitch can hand back a URL for a snapshot that hasn't
+        rendered on their CDN yet, which is exactly what produces the
+        'blank' thumbnail on some posts.
+        """
+        session = getattr(self.bot.app_state, "session", None)
+        if not session:
+            return True  # can't verify — don't block forever on this
+        try:
+            async with session.head(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
 
     # ──────────────────────────────────────────────────────────
     # "WHO'S LIVE" DASHBOARD
@@ -558,7 +576,18 @@ class LiveCommandsCog(commands.Cog):
                 users = await twitch_api.get_users_by_logins([login])
                 user_data = users.get(login)
 
-            embed = build_live_embed(stream_data, user_data or {})
+            # ── Verify the preview image actually exists before using it.
+            # ── A non-empty thumbnail_url doesn't guarantee Twitch has
+            # ── actually rendered the snapshot yet — using it blindly is
+            # ── exactly what produces a blank/broken image on some posts.
+            embed_stream_data = stream_data
+            raw_thumb = (stream_data.get("thumbnail_url") or "").replace("{width}", "1280").replace("{height}", "720")
+            if raw_thumb and not await self._thumbnail_is_ready(raw_thumb):
+                logger.info(f"on_stream_online: thumbnail not ready yet for {login} — posting without it for now")
+                embed_stream_data = dict(stream_data)
+                embed_stream_data["thumbnail_url"] = ""
+
+            embed = build_live_embed(embed_stream_data, user_data or {})
 
             from db.guild_settings import get_guild_config
             try:
@@ -641,9 +670,14 @@ class LiveCommandsCog(commands.Cog):
 
     async def _refresh_live_embed_loop(
         self, message: discord.Message, user_id: str, login: str,
-        attempts: int = 4, interval: int = 90,
+        attempts: int = 6, interval: int = 90,
     ):
-        """Re-edits the live embed a few times over several minutes to catch the real thumbnail once it renders."""
+        """
+        Re-checks the live preview image every couple of minutes for up to
+        ~9 minutes, and only edits the message once the image genuinely
+        exists — not just once Twitch's API returns a URL for it. Stops
+        as soon as a real thumbnail is confirmed, or once the stream ends.
+        """
         twitch_api = self.bot.app_state.twitch_api
         for attempt in range(attempts):
             await asyncio.sleep(interval)
@@ -658,6 +692,14 @@ class LiveCommandsCog(commands.Cog):
                 if not stream_data:
                     return  # stream already ended — nothing left to refresh
 
+                raw_thumb = (stream_data.get("thumbnail_url") or "").replace("{width}", "1280").replace("{height}", "720")
+                if raw_thumb and not await self._thumbnail_is_ready(raw_thumb):
+                    logger.info(
+                        f"on_stream_online: thumbnail still not ready for {login} "
+                        f"(check {attempt + 1}/{attempts}) — waiting for next check"
+                    )
+                    continue  # don't edit yet — try again next interval
+
                 if hasattr(twitch_api, "get_user"):
                     user_data = await twitch_api.get_user(login)
                 else:
@@ -666,14 +708,13 @@ class LiveCommandsCog(commands.Cog):
 
                 refreshed_embed = build_live_embed(stream_data, user_data or {})
                 await message.edit(embed=refreshed_embed)
-                logger.info(
-                    f"on_stream_online: thumbnail refresh attempt {attempt + 1}/{attempts} for {login}"
-                )
+                logger.info(f"on_stream_online: thumbnail confirmed and updated for {login} (check {attempt + 1}/{attempts})")
+                return  # got a real thumbnail — stop retrying
             except discord.NotFound:
                 return  # message was deleted — stop retrying
             except Exception as e:
                 logger.warning(
-                    f"on_stream_online: thumbnail refresh attempt {attempt + 1} failed for {login}: {e}"
+                    f"on_stream_online: thumbnail refresh check {attempt + 1} failed for {login}: {e}"
                 )
 
     @commands.Cog.listener()
