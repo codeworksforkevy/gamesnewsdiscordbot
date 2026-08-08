@@ -9,6 +9,7 @@ commands/live_commands.py.
 """
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from commands.live_commands import KNOWN_STREAMERS
 
@@ -92,10 +93,59 @@ class TwitchMonitor:
 
         logger.info(f"[Watchdog] Recovered missed notification for {login} in guild {guild_id}")
 
+    async def _recover_offline(self, login: str, user_id: str, guild_id: int) -> None:
+        """
+        Symmetric to _recover_stream, but for the reverse case: the DB
+        still thinks a streamer is live but Twitch says they're not —
+        meaning the stream.offline event was likely missed.
+
+        Rather than duplicate the offline-handling logic (VOD lookup,
+        stream_history closing, dashboard update, raid field, etc.) this
+        just dispatches the same event on_stream_offline already listens
+        for in commands/live_commands.py, reusing that flow entirely.
+        """
+        display_name = login
+        try:
+            if hasattr(self.twitch_api, "get_user_by_login"):
+                user_data = await self.twitch_api.get_user_by_login(login) or {}
+            elif hasattr(self.twitch_api, "get_user"):
+                user_data = await self.twitch_api.get_user(login) or {}
+            elif hasattr(self.twitch_api, "get_users_by_logins"):
+                users = await self.twitch_api.get_users_by_logins([login])
+                user_data = users.get(login, {})
+            else:
+                user_data = {}
+            display_name = user_data.get("display_name", login)
+        except Exception as e:
+            logger.warning(f"[Watchdog] Could not fetch display name for {login}: {e}")
+
+        # Estimate how long they were live from the open stream_history row
+        duration_mins = 0
+        try:
+            async with self.db.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT started_at FROM stream_history
+                    WHERE twitch_login = $1 AND guild_id = $2 AND ended_at IS NULL
+                    ORDER BY started_at DESC LIMIT 1
+                    """,
+                    login, guild_id,
+                )
+            if row and row["started_at"]:
+                elapsed = datetime.now(timezone.utc) - row["started_at"]
+                duration_mins = max(int(elapsed.total_seconds() // 60), 0)
+        except Exception as e:
+            logger.warning(f"[Watchdog] Could not compute duration for {login}: {e}")
+
+        self.bot.dispatch("stream_offline", user_id, login, display_name, duration_mins, guild_id)
+        logger.info(f"[Watchdog] Dispatched stream_offline for {login} (missed event reconciliation)")
+
     async def run_safety_check(self):
         """
         [Watchdog] Periodically verifies live status against Twitch API.
         If an EventSub notification was missed, posts it directly.
+        Also catches the reverse case — a missed stream.offline event
+        leaving is_live stuck as TRUE — and reconciles it the same way.
 
         NOTE: TwitchAPI in this codebase only exposes get_streams_by_ids —
         there is no get_streams_by_logins method. All lookups must go
@@ -128,6 +178,7 @@ class TwitchMonitor:
 
             # ── 3. Batch-fetch live status from Twitch API ────────────────────
             live_streams = await self.twitch_api.get_streams_by_ids(user_ids)
+            live_now = {s["user_login"].lower() for s in live_streams}
 
             # ── 4. Recovery: post notifications for any missed EventSub events ─
             for stream in live_streams:
@@ -149,6 +200,37 @@ class TwitchMonitor:
                     await self._recover_stream(login, guild_id, stream)
                 except Exception as e:
                     logger.error(f"[Watchdog] Recovery failed for {login}: {e}", exc_info=True)
+
+            # ── 5. Reconciliation: catch missed OFFLINE events too ────────────
+            # Symmetric to step 4 — if the DB thinks a streamer is live but
+            # Twitch says they're not, the offline event was likely missed.
+            try:
+                stale_rows = await self.db.fetch(
+                    "SELECT twitch_login, twitch_user_id, guild_id FROM streamers WHERE is_live = TRUE"
+                )
+                for row in stale_rows:
+                    login = row["twitch_login"]
+                    if login in live_now or login not in tracked:
+                        continue
+
+                    status_key = f"stream:status:{login}"
+                    still_marked_live = await self.redis.get(status_key)
+                    if not still_marked_live:
+                        continue  # already reconciled elsewhere (e.g. /live list self-heal)
+
+                    guild_id = row["guild_id"]
+                    user_id = str(row["twitch_user_id"]) if row["twitch_user_id"] else tracked[login][0]
+
+                    logger.warning(
+                        f"[Watchdog] {login} is marked live in DB but Twitch says offline — "
+                        f"the stream.offline event was likely missed. Reconciling."
+                    )
+                    try:
+                        await self._recover_offline(login, user_id, guild_id)
+                    except Exception as e:
+                        logger.error(f"[Watchdog] Offline reconciliation failed for {login}: {e}", exc_info=True)
+            except Exception as e:
+                logger.error(f"[Watchdog] Offline reconciliation pass failed: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"[Watchdog] Failed to run safety check: {e}", exc_info=True)
