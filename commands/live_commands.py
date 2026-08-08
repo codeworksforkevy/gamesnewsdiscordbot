@@ -986,13 +986,51 @@ class LiveCommandsCog(commands.Cog):
             pool = self.bot.app_state.db.pool
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT twitch_login, is_live FROM streamers WHERE guild_id = $1 ORDER BY twitch_login ASC",
+                    "SELECT twitch_login, twitch_user_id, is_live FROM streamers WHERE guild_id = $1 ORDER BY twitch_login ASC",
                     interaction.guild_id,
                 )
             
             if not rows:
                 await interaction.followup.send("💤 The subscription database is completely empty.")
                 return
+
+            # ── Verify actual live status via Twitch API instead of trusting
+            # ── the DB flag — is_live only flips back to FALSE when
+            # ── on_stream_offline fires, and a missed offline event (just
+            # ── like a missed online event) leaves it stuck as TRUE.
+            live_logins: set[str] = set()
+            user_ids = [str(r["twitch_user_id"]) for r in rows if r["twitch_user_id"]]
+            if user_ids:
+                try:
+                    twitch_api = self.bot.app_state.twitch_api
+                    live_streams = await twitch_api.get_streams_by_ids(user_ids)
+                    live_logins = {s["user_login"].lower() for s in live_streams}
+                except Exception as e:
+                    logger.warning(f"live_list: Twitch API check failed, falling back to DB flags: {e}")
+                    live_logins = {r["twitch_login"] for r in rows if r["is_live"]}
+
+            # ── Self-heal: fix any DB rows where is_live is stale ──────
+            stale_live = [r["twitch_login"] for r in rows if r["is_live"] and r["twitch_login"] not in live_logins]
+            stale_offline = [r["twitch_login"] for r in rows if not r["is_live"] and r["twitch_login"] in live_logins]
+            if stale_live or stale_offline:
+                try:
+                    async with pool.acquire() as conn:
+                        for login in stale_live:
+                            await conn.execute(
+                                "UPDATE streamers SET is_live = FALSE, last_updated = NOW() WHERE twitch_login = $1 AND guild_id = $2",
+                                login, interaction.guild_id,
+                            )
+                        for login in stale_offline:
+                            await conn.execute(
+                                "UPDATE streamers SET is_live = TRUE, last_updated = NOW() WHERE twitch_login = $1 AND guild_id = $2",
+                                login, interaction.guild_id,
+                            )
+                    if stale_live:
+                        logger.info(f"live_list: corrected stale is_live=TRUE for {stale_live}")
+                    if stale_offline:
+                        logger.info(f"live_list: corrected stale is_live=FALSE for {stale_offline}")
+                except Exception as e:
+                    logger.error(f"live_list: failed to self-heal stale is_live flags: {e}")
 
             embed = discord.Embed(
                 title="📡 Monitored Twitch Channels",
@@ -1002,7 +1040,7 @@ class LiveCommandsCog(commands.Cog):
             
             lines = [
                 f"• [{row['twitch_login']}](https://www.twitch.tv/{row['twitch_login']}) — "
-                f"{'🔴 **LIVE**' if row['is_live'] else '💤 Offline'}"
+                f"{'🔴 **LIVE**' if row['twitch_login'] in live_logins else '💤 Offline'}"
                 for row in rows
             ]
             
