@@ -278,69 +278,6 @@ class LiveCommandsCog(commands.Cog):
             return False
 
     # ──────────────────────────────────────────────────────────
-    # "WHO'S LIVE" DASHBOARD
-    # ──────────────────────────────────────────────────────────
-
-    async def _update_dashboard(self, guild_id: int) -> None:
-        """Maintains a single, auto-updating 'who's live' message instead of a new post per event."""
-        try:
-            pool = self.bot.app_state.db.pool
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT twitch_login, game_name FROM streamers
-                    WHERE guild_id = $1 AND is_live = TRUE
-                    ORDER BY twitch_login ASC
-                    """,
-                    guild_id,
-                )
-
-            from db.guild_settings import get_guild_config
-            try:
-                cfg = await get_guild_config(guild_id)
-                announce_channel_id = (cfg or {}).get("announce_channel_id") or ANNOUNCE_CHANNEL_ID
-            except Exception:
-                announce_channel_id = ANNOUNCE_CHANNEL_ID
-
-            channel = self.bot.get_channel(announce_channel_id)
-            if not channel:
-                return
-
-            if rows:
-                lines = [
-                    f"**[{r['twitch_login']}](https://www.twitch.tv/{r['twitch_login']})** — "
-                    f"{r['game_name'] or 'Just Chatting'}"
-                    for r in rows
-                ]
-                description = "\n".join(lines)
-            else:
-                description = "Nobody is live right now."
-
-            embed = discord.Embed(
-                title="Who's Live Right Now",
-                description=description,
-                color=0xFFB6C1,
-            )
-            embed.set_footer(text="Updates automatically • Find a Curie")
-            embed.timestamp = discord.utils.utcnow()
-
-            dash_key = f"dashboard:msg:{guild_id}"
-            msg_id = await self.bot.app_state.redis.get(dash_key)
-
-            if msg_id:
-                try:
-                    message = await channel.fetch_message(int(msg_id))
-                    await message.edit(embed=embed)
-                    return
-                except (discord.NotFound, discord.HTTPException):
-                    pass  # message gone — fall through and send a fresh one
-
-            sent = await channel.send(embed=embed)
-            await self.bot.app_state.redis.set(dash_key, str(sent.id))
-        except Exception as e:
-            logger.error(f"_update_dashboard failed for guild {guild_id}: {e}", exc_info=True)
-
-    # ──────────────────────────────────────────────────────────
     # RAID DETECTION
     # ──────────────────────────────────────────────────────────
     # NOTE: nothing calls record_raid() yet. It needs to be wired to a
@@ -432,7 +369,6 @@ class LiveCommandsCog(commands.Cog):
         while True:
             try:
                 await self._check_title_changes()
-                await self._update_dashboard(GUILD_ID)
             except Exception as e:
                 logger.error(f"_title_change_loop: cycle failed: {e}", exc_info=True)
             await asyncio.sleep(120)  # every 2 minutes
@@ -651,8 +587,6 @@ class LiveCommandsCog(commands.Cog):
 
             logger.info(f"on_stream_online: posted live announcement for {login} in guild {guild_id}")
 
-            await self._update_dashboard(guild_id)
-
             # ── Refresh the thumbnail over the next several minutes ────
             # A single retry isn't reliable enough: Twitch's live preview
             # snapshot can take several minutes (not seconds) to actually
@@ -789,8 +723,6 @@ class LiveCommandsCog(commands.Cog):
                     sent_msg, user_id, login, display_name, duration_mins, last_title, user_info, raid_target,
                 )
             )
-
-        await self._update_dashboard(guild_id)
 
         # ── Update DB: mark streamer as offline ──────────────────
         try:
@@ -1141,8 +1073,6 @@ class LiveCommandsCog(commands.Cog):
             except Exception as e:
                 logger.error(f"live_force: failed to insert stream_history for {username_clean}: {e}")
 
-            await self._update_dashboard(guild_id)
-
             await interaction.followup.send(
                 f"🚀 Live notification sent for **{username_clean}** in <#{announce_channel_id}>."
             )
@@ -1150,16 +1080,55 @@ class LiveCommandsCog(commands.Cog):
             logger.error(f"Bypass injection sequence failed for {username_clean}: {e}", exc_info=True)
             await interaction.followup.send("❌ Error forcing stream validation context processing.")
 
-    @live_group.command(name="dashboard", description="Post or refresh the 'who's live now' dashboard.")
+    @live_group.command(name="dashboard", description="Shows who's currently live — only visible to you.")
     async def live_dashboard(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         guild_id = interaction.guild_id or GUILD_ID
         try:
-            await self._update_dashboard(guild_id)
-            await interaction.followup.send("Dashboard refreshed.")
+            pool = self.bot.app_state.db.pool
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT twitch_login, twitch_user_id FROM streamers WHERE guild_id = $1",
+                    guild_id,
+                )
+
+            if not rows:
+                await interaction.followup.send("No streamers tracked yet.", ephemeral=True)
+                return
+
+            # Verify actual live status via Twitch API rather than trusting
+            # the DB's is_live flag — that flag only updates when
+            # on_stream_online/on_stream_offline fire, and a missed event
+            # can leave it stale (the same issue /live list had).
+            user_ids = [str(r["twitch_user_id"]) for r in rows if r["twitch_user_id"]]
+            live_map: dict[str, dict] = {}
+            if user_ids:
+                try:
+                    twitch_api = self.bot.app_state.twitch_api
+                    live_streams = await twitch_api.get_streams_by_ids(user_ids)
+                    live_map = {s["user_login"].lower(): s for s in live_streams}
+                except Exception as e:
+                    logger.warning(f"live_dashboard: Twitch API check failed: {e}")
+
+            if live_map:
+                lines = [
+                    f"**[{login}](https://www.twitch.tv/{login})** — {s.get('game_name') or 'Just Chatting'}"
+                    for login, s in sorted(live_map.items())
+                ]
+                description = "\n".join(lines)
+            else:
+                description = "Nobody is live right now."
+
+            embed = discord.Embed(
+                title="Who's Live Right Now",
+                description=description,
+                color=0xFFB6C1,
+            )
+            embed.timestamp = discord.utils.utcnow()
+            await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
             logger.error(f"live_dashboard failed: {e}", exc_info=True)
-            await interaction.followup.send("Failed to refresh the dashboard.")
+            await interaction.followup.send("Failed to build the dashboard.", ephemeral=True)
 
     @live_group.command(name="streaks", description="Shows a streamer's current and longest streaming streak.")
     @app_commands.describe(username="The Twitch login username to check streak stats for")
@@ -1326,7 +1295,6 @@ class LiveCommandsCog(commands.Cog):
                 recovered += 1
 
             if recovered:
-                await self._update_dashboard(guild_id)
                 await interaction.followup.send(
                     f"📡 Scan complete — recovered **{recovered}** missed stream notification(s)!"
                 )
