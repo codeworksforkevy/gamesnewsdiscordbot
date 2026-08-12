@@ -8,6 +8,8 @@ Improvements over original:
 - Subscribes to BOTH stream.online and stream.offline
 - No wasteful backward-compat helper that opens a new session per call
 - Config validated once at construction, not inside every method
+- Also subscribes to channel.raid (as the FROM broadcaster) so raids can
+  be surfaced in that streamer's "stream ended" post
 """
 
 import logging
@@ -142,17 +144,21 @@ class EventSubManager:
         event_type: str,
         broadcaster_user_id: str,
         callback_url: str,
+        condition: Optional[dict] = None,
         _retry: bool = True,
     ) -> bool:
         """
         Creates a single EventSub subscription.
         Automatically refreshes token on 401 and retries once.
+        `condition` overrides the default {"broadcaster_user_id": ...} —
+        needed for event types like channel.raid that key off a
+        differently-named condition field.
         Returns True on success.
         """
         payload = {
             "type":    event_type,
             "version": "1",
-            "condition": {"broadcaster_user_id": broadcaster_user_id},
+            "condition": condition or {"broadcaster_user_id": broadcaster_user_id},
             "transport": {
                 "method":   "webhook",
                 "callback": callback_url,
@@ -173,7 +179,8 @@ class EventSubManager:
                     logger.warning("Got 401 on subscribe — refreshing token and retrying")
                     if await self._refresh_token():
                         return await self._subscribe(
-                            event_type, broadcaster_user_id, callback_url, _retry=False
+                            event_type, broadcaster_user_id, callback_url,
+                            condition=condition, _retry=False,
                         )
 
                 if resp.status >= 300:
@@ -231,14 +238,22 @@ class EventSubManager:
         callback_url: str,
     ) -> None:
         """
-        Subscribes to stream.online and stream.offline for the given
-        broadcaster — skipping any that already exist.
+        Subscribes to stream.online, stream.offline, channel.update, and
+        channel.raid for the given broadcaster — skipping any that already
+        exist. channel.raid is subscribed as the FROM broadcaster (we want
+        to know who THIS streamer raided, not who raided them).
         """
         existing = await self._existing_subscriptions(broadcaster_user_id)
 
-        wanted = ["stream.online", "stream.offline", "channel.update"]
+        # event_type -> condition override (None = default broadcaster_user_id)
+        wanted: dict[str, Optional[dict]] = {
+            "stream.online":  None,
+            "stream.offline": None,
+            "channel.update": None,
+            "channel.raid":   {"from_broadcaster_user_id": broadcaster_user_id},
+        }
 
-        for event_type in wanted:
+        for event_type, condition in wanted.items():
             if event_type in existing:
                 logger.info(
                     f"Subscription already active, skipping",
@@ -249,7 +264,7 @@ class EventSubManager:
                 )
                 continue
 
-            await self._subscribe(event_type, broadcaster_user_id, callback_url)
+            await self._subscribe(event_type, broadcaster_user_id, callback_url, condition=condition)
 
     async def delete_subscription(self, subscription_id: str) -> None:
         """Removes a specific subscription by ID."""
