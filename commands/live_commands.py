@@ -206,7 +206,7 @@ async def build_offline_embed(
     ai_text = await generate_offline_message(display_name, duration_mins)
 
     embed = discord.Embed(
-        title=f"🧑‍💻 {display_name} has stepped away from the keyboard!",
+        title=f" {display_name} has wrapped up their stream!",
         description=ai_text,
         color=0x1C1C2E, 
     )
@@ -216,7 +216,7 @@ async def build_offline_embed(
         embed.set_thumbnail(url=icon_url)
 
     if title:
-        embed.add_field(name="📝 They were streaming", value=title, inline=False)
+        embed.add_field(name="🧑‍💻 They were streaming", value=title, inline=False)
 
     if raided_login:
         embed.add_field(
