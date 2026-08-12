@@ -1080,56 +1080,6 @@ class LiveCommandsCog(commands.Cog):
             logger.error(f"Bypass injection sequence failed for {username_clean}: {e}", exc_info=True)
             await interaction.followup.send("❌ Error forcing stream validation context processing.")
 
-    @live_group.command(name="dashboard", description="Shows who's currently live — only visible to you.")
-    async def live_dashboard(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        guild_id = interaction.guild_id or GUILD_ID
-        try:
-            pool = self.bot.app_state.db.pool
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT twitch_login, twitch_user_id FROM streamers WHERE guild_id = $1",
-                    guild_id,
-                )
-
-            if not rows:
-                await interaction.followup.send("No streamers tracked yet.", ephemeral=True)
-                return
-
-            # Verify actual live status via Twitch API rather than trusting
-            # the DB's is_live flag — that flag only updates when
-            # on_stream_online/on_stream_offline fire, and a missed event
-            # can leave it stale (the same issue /live list had).
-            user_ids = [str(r["twitch_user_id"]) for r in rows if r["twitch_user_id"]]
-            live_map: dict[str, dict] = {}
-            if user_ids:
-                try:
-                    twitch_api = self.bot.app_state.twitch_api
-                    live_streams = await twitch_api.get_streams_by_ids(user_ids)
-                    live_map = {s["user_login"].lower(): s for s in live_streams}
-                except Exception as e:
-                    logger.warning(f"live_dashboard: Twitch API check failed: {e}")
-
-            if live_map:
-                lines = [
-                    f"**[{login}](https://www.twitch.tv/{login})** — {s.get('game_name') or 'Just Chatting'}"
-                    for login, s in sorted(live_map.items())
-                ]
-                description = "\n".join(lines)
-            else:
-                description = "Nobody is live right now."
-
-            embed = discord.Embed(
-                title="Who's Live Right Now",
-                description=description,
-                color=0xFFB6C1,
-            )
-            embed.timestamp = discord.utils.utcnow()
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            logger.error(f"live_dashboard failed: {e}", exc_info=True)
-            await interaction.followup.send("Failed to build the dashboard.", ephemeral=True)
-
     @live_group.command(name="streaks", description="Shows a streamer's current and longest streaming streak.")
     @app_commands.describe(username="The Twitch login username to check streak stats for")
     async def live_streaks(self, interaction: discord.Interaction, username: str):
